@@ -5,6 +5,7 @@ import type { GeneratedFile } from '../parser/xmlGenerator';
 export interface ITBConfig {
   baseUrl: string;         // e.g. http://localhost:9000
   deployPath: string;      // e.g. /api/rest/testsuite/deploy
+  masterApiKey?: string;       // master API key for creating communities/domains
   organisationApiKey?: string; // organisation API key for test execution
   communityApiKey?: string;    // community API key for deployment (needs "manage test suites")
   specificationId?: string;    // target specification ID for deployment
@@ -34,6 +35,7 @@ function envDefaults(): ITBConfig {
   return {
     baseUrl: import.meta.env.VITE_ITB_BASE_URL || 'http://localhost:9000',
     deployPath: import.meta.env.VITE_ITB_DEPLOY_PATH || '/api/rest/testsuite/deploy',
+    masterApiKey: import.meta.env.VITE_ITB_MASTER_API_KEY || undefined,
     organisationApiKey: import.meta.env.VITE_ITB_ORGANISATION_API_KEY || undefined,
     systemApiKey: import.meta.env.VITE_ITB_SYSTEM_API_KEY || undefined,
     communityApiKey: import.meta.env.VITE_ITB_COMMUNITY_API_KEY || undefined,
@@ -194,6 +196,31 @@ export async function checkITBHealth(baseUrl: string): Promise<{ ok: boolean; me
     return { ok: false, message: 'ITB reachable but REST API not enabled (set AUTOMATION_API_ENABLED=true)' };
   } catch {
     return { ok: false, message: 'ITB reachable but REST API not available' };
+  }
+}
+
+/**
+ * Validate a master API key by attempting GET /api/rest/domains.
+ * With a valid master key this returns 200; invalid returns 403.
+ */
+export async function checkMasterKey(baseUrl: string, masterKey: string): Promise<{ ok: boolean; message: string }> {
+  const url = proxyUrl(baseUrl, '/api/rest/domains');
+  try {
+    const resp = await fetch(url, {
+      method: 'GET',
+      headers: { 'ITB_API_KEY': masterKey },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (resp.status === 200) {
+      return { ok: true, message: 'Master key valid' };
+    }
+    const body = await resp.json().catch(() => null);
+    if (resp.status === 403 || resp.status === 401) {
+      return { ok: false, message: body?.error_description || 'Master key rejected' };
+    }
+    return { ok: false, message: `Unexpected response (${resp.status})` };
+  } catch (err: any) {
+    return { ok: false, message: `Connection error: ${err?.message || err}` };
   }
 }
 

@@ -3,9 +3,14 @@ import { ITBConfig, loadITBConfig, saveITBConfig } from '../services/itbClient';
 
 export interface AppState {
   connected: boolean;
+  hasMasterKey: boolean;
   domainKey: string;
   domainName: string;
   communityKey: string;
+  communityApiKey: string;
+  organisationApiKey: string;
+  selectedCommunity: { apiKey: string; shortName: string; fullName: string } | null;
+  selectedOrganisation: { apiKey: string; shortName: string; fullName: string } | null;
   importedIGs: Record<string, { version: string; url: string; spec_keys: string[] }>;
 }
 
@@ -45,7 +50,9 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   const [itbSettingsOpen, setITBSettingsOpen] = useState(false);
   const [path, setPath] = useState(getHashPath);
   const [appState, setAppState] = useState<AppState>({
-    connected: false, domainKey: '', domainName: '', communityKey: '', importedIGs: {},
+    connected: false, hasMasterKey: false, domainKey: '', domainName: '', communityKey: '',
+    communityApiKey: '', organisationApiKey: '',
+    selectedCommunity: null, selectedOrganisation: null, importedIGs: {},
   });
 
   // Spec selection persisted in localStorage
@@ -88,11 +95,24 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         const d = await r.json();
         setAppState({
           connected: d.connected,
+          hasMasterKey: d.has_master_key || false,
           domainKey: d.domain_key || '',
           domainName: d.domain_name || '',
           communityKey: d.community_key || '',
+          communityApiKey: d.community_api_key || '',
+          organisationApiKey: d.organisation_api_key || '',
+          selectedCommunity: d.selected_community || null,
+          selectedOrganisation: d.selected_organisation || null,
           importedIGs: d.imported_igs || {},
         });
+        // Auto-populate itbConfig keys from server state
+        if (d.community_api_key || d.organisation_api_key) {
+          setITBConfig(prev => ({
+            ...prev,
+            communityApiKey: d.community_api_key || prev.communityApiKey,
+            organisationApiKey: d.organisation_api_key || prev.organisationApiKey,
+          }));
+        }
       }
     } catch {}
   };

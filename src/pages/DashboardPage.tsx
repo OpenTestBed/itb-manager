@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Globe, FileCheck, TestTube2, Building2, PackagePlus, ExternalLink, CheckCircle, Circle, ArrowRight, Settings, Container } from 'lucide-react';
+import { Globe, FileCheck, TestTube2, Building2, PackagePlus, CheckCircle, Circle, ArrowRight, Settings, Container } from 'lucide-react';
 import { useAppContext } from '../context/AppContext';
 
 export function DashboardPage() {
@@ -7,6 +7,7 @@ export function DashboardPage() {
   const [domains, setDomains] = useState<any[]>([]);
   const [specs, setSpecs] = useState<any[]>([]);
   const [orgs, setOrgs] = useState<any[]>([]);
+  const [communities, setCommunities] = useState<any[]>([]);
 
   useEffect(() => {
     fetch('/api/domains').then(r => r.ok ? r.json() : []).then(setDomains).catch(() => {});
@@ -14,18 +15,20 @@ export function DashboardPage() {
       fetch(`/api/domains/${appState.domainKey}/specifications`).then(r => r.ok ? r.json() : []).then(setSpecs).catch(() => {});
     }
     fetch('/api/organizations').then(r => r.ok ? r.json() : []).then(setOrgs).catch(() => {});
+    fetch('/api/communities').then(r => r.ok ? r.json() : []).then(setCommunities).catch(() => {});
   }, [appState.domainKey]);
 
   const igs = Object.entries(appState.importedIGs);
-  const hasApiKey = !!(itbConfig.communityApiKey || itbConfig.organisationApiKey);
-  const isFresh = !appState.connected || !hasApiKey;
+  const hasMasterKey = appState.hasMasterKey || !!itbConfig.masterApiKey;
+  const hasCommunity = !!appState.communityApiKey || communities.length > 0;
+  const hasOrg = !!appState.organisationApiKey;
 
   // Guided setup steps
   const steps = [
     { id: 'itb', label: 'Start ITB', description: 'Run docker compose up in your itb-starter directory', done: appState.connected },
-    { id: 'login', label: 'Log into ITB', description: 'Open ITB, create a community and get your API keys', done: hasApiKey },
-    { id: 'keys', label: 'Configure API keys', description: 'Enter your community and organisation API keys in Settings', done: hasApiKey && !!itbConfig.specificationId },
-    { id: 'domain', label: 'Select a domain', description: 'Choose which domain to work with', done: !!appState.domainKey },
+    { id: 'keys', label: 'Configure master API key', description: 'Enter the master API key in Settings (matches AUTOMATION_API_MASTER_KEY in docker-compose)', done: hasMasterKey },
+    { id: 'community', label: 'Create a community', description: 'Use the + button in the sidebar to create a community', done: hasCommunity },
+    { id: 'domain', label: 'Create a domain', description: 'Use the + button under Domains in the sidebar', done: !!appState.domainKey || domains.length > 0 },
     { id: 'import', label: 'Import a Testing IG', description: 'Upload an IG package to add test suites', done: igs.length > 0 },
   ];
   const completedSteps = steps.filter(s => s.done).length;
@@ -56,22 +59,10 @@ export function DashboardPage() {
                   <div className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">{step.description}</div>
                 </div>
                 {/* Action buttons for incomplete steps */}
-                {!step.done && step.id === 'login' && (
-                  <a href={itbConfig.baseUrl || 'http://localhost:10003'} target="_blank" rel="noopener"
-                    className="flex items-center gap-1 px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 flex-shrink-0">
-                    Open ITB <ExternalLink size={10} />
-                  </a>
-                )}
                 {!step.done && step.id === 'keys' && (
                   <button onClick={() => setITBSettingsOpen(true)}
                     className="flex items-center gap-1 px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 flex-shrink-0">
                     <Settings size={10} /> Settings
-                  </button>
-                )}
-                {!step.done && step.id === 'domain' && (
-                  <button onClick={() => navigate('domains')}
-                    className="flex items-center gap-1 px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700 flex-shrink-0">
-                    Domains <ArrowRight size={10} />
                   </button>
                 )}
                 {!step.done && step.id === 'import' && (

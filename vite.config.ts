@@ -533,10 +533,14 @@ function parseTestPlan(data: any, binaries: Record<string, any>, rawFiles: Recor
     // 2. From raw files in package/tests/ or package/
     if (suiteType === 'gherkin' && !gherkinContent && gherkinFile) {
       const stem = path.parse(gherkinFile).name;
+      console.log(`[parseTestPlan] Looking for gherkin file="${gherkinFile}" stem="${stem}"`);
+      console.log(`[parseTestPlan] Available binaries: [${Object.keys(binaries).join(', ')}]`);
+      console.log(`[parseTestPlan] Available raw files: [${Object.keys(rawFiles).filter(f => f.includes('.feature') || f.includes('tests/')).join(', ')}]`);
       // Try binaries
       for (const [bid, bdata] of Object.entries(binaries)) {
         if ((stem.includes(bid) || bid.includes(stem)) && (bdata as any).data) {
           gherkinContent = Buffer.from((bdata as any).data, 'base64').toString('utf-8');
+          console.log(`[parseTestPlan] Found in binary: ${bid}`);
           break;
         }
       }
@@ -545,9 +549,11 @@ function parseTestPlan(data: any, binaries: Record<string, any>, rawFiles: Recor
         for (const [fname, buf] of Object.entries(rawFiles)) {
           if (fname.endsWith(gherkinFile) || fname.endsWith(`/${gherkinFile}`) || fname.endsWith(`/${stem}.feature`)) {
             gherkinContent = buf.toString('utf-8');
+            console.log(`[parseTestPlan] Found in raw file: ${fname}`);
             break;
           }
         }
+        if (!gherkinContent) console.log(`[parseTestPlan] NOT FOUND in any raw file`);
       }
     }
 
@@ -622,7 +628,7 @@ function managementApi(db: { container: string; user: string; password: string; 
 
   function loadState(): any {
     try { return JSON.parse(fs.readFileSync(stateFile, 'utf-8')); }
-    catch { return { itb_url: 'http://localhost:10003', itb_api_key: '', community_key: '', domain_key: '', domain_name: '', imported_igs: {} }; }
+    catch { return { itb_url: 'http://localhost:10003', itb_api_key: '', master_api_key: '', community_key: '', community_api_key: '', organisation_api_key: '', domain_key: '', domain_name: '', selected_community: null, selected_organisation: null, imported_igs: {} }; }
   }
   function saveState(s: any) {
     const dir = path.dirname(stateFile);
@@ -630,11 +636,22 @@ function managementApi(db: { container: string; user: string; password: string; 
     fs.writeFileSync(stateFile, JSON.stringify(s, null, 2));
   }
 
-  async function itbFetch(urlPath: string, opts: any = {}, apiKey?: string): Promise<any> {
+  async function itbFetch(urlPath: string, opts: any = {}, apiKey?: string, authLevel?: 'master' | 'community' | 'organisation'): Promise<any> {
     const state = loadState();
-    const key = apiKey || state.itb_api_key || env.VITE_ITB_COMMUNITY_API_KEY || env.VITE_ITB_ORGANISATION_API_KEY || '';
+    let key = apiKey || '';
+    if (!key) {
+      if (authLevel === 'master') {
+        key = state.master_api_key || env.VITE_ITB_MASTER_API_KEY || '';
+      } else if (authLevel === 'organisation') {
+        key = state.organisation_api_key || env.VITE_ITB_ORGANISATION_API_KEY || '';
+      } else {
+        // Default: community key, fallback chain
+        key = state.community_api_key || state.itb_api_key || env.VITE_ITB_COMMUNITY_API_KEY || env.VITE_ITB_ORGANISATION_API_KEY || '';
+      }
+    }
     const base = state.itb_url || env.VITE_ITB_BASE_URL || 'http://localhost:10003';
     const headers: Record<string, string> = { 'ITB_API_KEY': key, 'Content-Type': 'application/json', ...(opts.headers || {}) };
+    console.log(`[itbFetch] ${opts.method || 'GET'} ${urlPath} auth=${authLevel || 'default'} key=${key ? key.slice(0, 8) + '...' : '(empty)'}`);
     const resp = await fetch(`${base}/api/rest${urlPath}`, { ...opts, headers });
     return resp;
   }
@@ -662,17 +679,24 @@ function managementApi(db: { container: string; user: string; password: string; 
       server.middlewares.use('/api/state', (req, res) => {
         if (req.method !== 'GET') { res.statusCode = 405; res.end(''); return; }
         const state = loadState();
-        const apiKey = state.itb_api_key || env.VITE_ITB_COMMUNITY_API_KEY || '';
+        // Use master key first (works on fresh ITB), then community key
+        const masterKey = state.master_api_key || env.VITE_ITB_MASTER_API_KEY || '';
+        const communityKey = state.community_api_key || state.itb_api_key || env.VITE_ITB_COMMUNITY_API_KEY || '';
+        const apiKey = masterKey || communityKey;
         const baseUrl = state.itb_url || env.VITE_ITB_BASE_URL || 'http://localhost:10003';
-        // Check connection
-        fetch(`${baseUrl}/api/rest/domains`, { headers: { ITB_API_KEY: apiKey } })
+        // Check connection — try /api/rest OpenAPI endpoint (no auth needed)
+        fetch(`${baseUrl}/api/rest`, { signal: AbortSignal.timeout(5000) })
           .then(r => {
-            state.connected = r.status !== 401;
+            state.connected = r.status === 200;
+            state.has_master_key = !!masterKey;
+            state.community_api_key = state.community_api_key || '';
+            state.organisation_api_key = state.organisation_api_key || '';
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify(state));
           })
           .catch(() => {
             state.connected = false;
+            state.has_master_key = !!masterKey;
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify(state));
           });
@@ -685,7 +709,25 @@ function managementApi(db: { container: string; user: string; password: string; 
         const state = loadState();
         state.itb_url = body.url || state.itb_url;
         state.itb_api_key = body.api_key || state.itb_api_key;
+        if (body.master_api_key !== undefined) state.master_api_key = body.master_api_key;
+        if (body.community_api_key !== undefined) state.community_api_key = body.community_api_key;
+        if (body.organisation_api_key !== undefined) state.organisation_api_key = body.organisation_api_key;
         saveState(state);
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ status: 'ok' }));
+      });
+
+      // POST /api/reset — clear all server-side state
+      server.middlewares.use('/api/reset', (_req, res) => {
+        const freshState = {
+          itb_url: env.VITE_ITB_BASE_URL || 'http://localhost:10003',
+          itb_api_key: '', master_api_key: '', community_key: '',
+          community_api_key: '', organisation_api_key: '',
+          domain_key: '', domain_name: '',
+          selected_community: null, selected_organisation: null,
+          imported_igs: {},
+        };
+        saveState(freshState);
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ status: 'ok' }));
       });
@@ -702,16 +744,81 @@ function managementApi(db: { container: string; user: string; password: string; 
         res.end(JSON.stringify({ domain_key: state.domain_key, domain_name: state.domain_name }));
       });
 
+      // /api/communities — GET list, PUT create
+      server.middlewares.use('/api/communities', async (req, res) => {
+        if (req.method === 'GET') {
+          // List communities — try DB first (more reliable), fallback to empty
+          try {
+            const raw = dbQuery(`SELECT id, sname, fname, api_key FROM Communities WHERE id > 0`);
+            const communities: any[] = [];
+            if (raw) {
+              for (const line of raw.split('\n')) {
+                const [id, shortName, fullName, apiKey] = line.split('\t');
+                if (id) communities.push({ id: Number(id), shortName, fullName, apiKey });
+              }
+            }
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify(communities));
+          } catch { res.setHeader('Content-Type', 'application/json'); res.end('[]'); }
+        } else if (req.method === 'PUT') {
+          // Create community — requires master key
+          try {
+            const body = await readBody(req);
+            const r = await itbFetch('/community', { method: 'PUT', body }, undefined, 'master');
+            const data = await r.json();
+            if (r.ok && data.apiKey) {
+              // Auto-store community API key
+              const state = loadState();
+              state.community_api_key = data.apiKey;
+              const parsed = JSON.parse(body);
+              state.selected_community = { apiKey: data.apiKey, shortName: parsed.shortName, fullName: parsed.fullName };
+              saveState(state);
+            }
+            res.statusCode = r.status;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify(data));
+          } catch (e: any) {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: e.message }));
+          }
+        } else { res.statusCode = 405; res.end(''); }
+      });
+
+      // POST /api/select-community — select a community and store its API key
+      server.middlewares.use('/api/select-community', async (req, res) => {
+        if (req.method !== 'POST') { res.statusCode = 405; res.end(''); return; }
+        const body = JSON.parse(await readBody(req));
+        const state = loadState();
+        state.community_api_key = body.apiKey || '';
+        state.selected_community = body.apiKey ? { apiKey: body.apiKey, shortName: body.shortName || '', fullName: body.fullName || '' } : null;
+        saveState(state);
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ status: 'ok' }));
+      });
+
+      // POST /api/select-organisation — select an org and store its API key
+      server.middlewares.use('/api/select-organisation', async (req, res) => {
+        if (req.method !== 'POST') { res.statusCode = 405; res.end(''); return; }
+        const body = JSON.parse(await readBody(req));
+        const state = loadState();
+        state.organisation_api_key = body.apiKey || '';
+        state.selected_organisation = body.apiKey ? { apiKey: body.apiKey, shortName: body.shortName || '', fullName: body.fullName || '' } : null;
+        saveState(state);
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ status: 'ok' }));
+      });
+
       // /api/domains — GET list, PUT create, /api/domains/{key}/specifications
       server.middlewares.use('/api/domains', async (req, res, next) => {
         const url = new URL(req.url || '/', `http://${req.headers.host}`);
         const pathParts = url.pathname.replace(/^\//, '').split('/');
 
-        // PUT /api/domains — create domain
+        // PUT /api/domains — create domain (requires master key per ITB API)
         if (req.method === 'PUT' && (pathParts.length === 0 || (pathParts.length === 1 && !pathParts[0]))) {
           try {
             const body = await readBody(req);
-            const r = await itbFetch('/domain', { method: 'PUT', body });
+            const r = await itbFetch('/domain', { method: 'PUT', body }, undefined, 'master');
             const data = await r.json();
             res.statusCode = r.status;
             res.setHeader('Content-Type', 'application/json');
@@ -775,19 +882,53 @@ function managementApi(db: { container: string; user: string; password: string; 
         next();
       });
 
-      // GET /api/organizations
+      // /api/organizations — GET list, PUT create
       server.middlewares.use('/api/organizations', async (req, res) => {
         if (req.method === 'GET') {
           try {
-            const r = await itbFetch('/organisation');
+            const r = await itbFetch('/organisation', {}, undefined, 'community');
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify(r.ok ? await r.json() : []));
           } catch { res.setHeader('Content-Type', 'application/json'); res.end('[]'); }
         } else if (req.method === 'PUT') {
-          const body = await readBody(req);
-          const r = await itbFetch('/organisation', { method: 'PUT', body });
-          res.setHeader('Content-Type', 'application/json');
-          res.end(JSON.stringify(r.ok ? await r.json() : { error: await r.text() }));
+          try {
+            const body = await readBody(req);
+            const r = await itbFetch('/organisation', { method: 'PUT', body }, undefined, 'community');
+            const data = await r.json();
+            if (r.ok && data.apiKey) {
+              // Auto-store organisation API key
+              const state = loadState();
+              state.organisation_api_key = data.apiKey;
+              const parsed = JSON.parse(body);
+              state.selected_organisation = { apiKey: data.apiKey, shortName: parsed.shortName, fullName: parsed.fullName };
+              saveState(state);
+            }
+            res.statusCode = r.status;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify(data));
+          } catch (e: any) {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: e.message }));
+          }
+        } else { res.statusCode = 405; res.end(''); }
+      });
+
+      // /api/systems — PUT create system
+      server.middlewares.use('/api/systems', async (req, res) => {
+        if (req.method === 'PUT') {
+          try {
+            const body = await readBody(req);
+            const r = await itbFetch('/system', { method: 'PUT', body }, undefined, 'community');
+            const data = await r.json();
+            res.statusCode = r.status;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify(data));
+          } catch (e: any) {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: e.message }));
+          }
         } else { res.statusCode = 405; res.end(''); }
       });
 
@@ -885,9 +1026,19 @@ function managementApi(db: { container: string; user: string; password: string; 
         res.end('');
       });
 
-      // GET /api/itb-tree — full ITB hierarchy (domains → specs → actors + test suites from DB)
+      // GET /api/itb-tree — full ITB hierarchy: communities → domains → specs → actors/test suites, orgs → systems
       server.middlewares.use('/api/itb-tree', async (_req, res) => {
         try {
+          // Fetch communities from DB
+          const commRaw = dbQuery(`SELECT id, sname, fname, api_key FROM Communities WHERE id > 0`);
+          const communities: any[] = [];
+          if (commRaw) {
+            for (const line of commRaw.split('\n')) {
+              const [id, shortName, fullName, apiKey] = line.split('\t');
+              if (id) communities.push({ id: Number(id), shortName, fullName, apiKey });
+            }
+          }
+
           // Fetch domains
           const domainsResp = await itbFetch('/domains');
           const domains: any[] = domainsResp.ok ? await domainsResp.json() : [];
@@ -933,12 +1084,31 @@ function managementApi(db: { container: string; user: string; password: string; 
           // Also fetch orgs
           let orgs: any[] = [];
           try {
-            const orgsResp = await itbFetch('/organisation');
+            const orgsResp = await itbFetch('/organisation', {}, undefined, 'community');
             if (orgsResp.ok) orgs = await orgsResp.json();
           } catch {}
 
+          // Fetch systems for each org from DB
+          for (const org of orgs) {
+            const sysRaw = dbQuery(`SELECT s.id, s.sname, s.fname, s.api_key FROM Systems s JOIN Organizations o ON s.owner = o.id WHERE o.api_key = '${org.apiKey}'`);
+            org.systems = [];
+            if (sysRaw) {
+              for (const line of sysRaw.split('\n')) {
+                const [id, shortName, fullName, apiKey] = line.split('\t');
+                if (id) org.systems.push({ id: Number(id), shortName, fullName, apiKey });
+              }
+            }
+          }
+
+          const state = loadState();
           res.setHeader('Content-Type', 'application/json');
-          res.end(JSON.stringify({ domains: tree, organisations: orgs }));
+          res.end(JSON.stringify({
+            communities,
+            domains: tree,
+            organisations: orgs,
+            selectedCommunity: state.selected_community,
+            selectedOrganisation: state.selected_organisation,
+          }));
         } catch (e: any) {
           res.statusCode = 500;
           res.setHeader('Content-Type', 'application/json');

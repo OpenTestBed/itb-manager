@@ -78,10 +78,22 @@ export function ImportIGPage() {
         console.log(`[Compile] ${id}: ${zipBytes.length} bytes (pre-built ITB ZIP from ${itbZipSuite.itb_zip_file})`);
       } else {
         // Gherkin-based — compile via the compiler service
-        if (!tp.raw_json || Object.keys(tp.raw_json).length === 0) { newErrors[id] = 'No raw TestPlan JSON'; continue; }
+        // Prefer already-resolved gherkin content from the IG package
+        const gherkinSuite = tp.suites?.find((s: any) => s.type === 'gherkin' && s.gherkin_content);
+        const gherkinContent = gherkinSuite?.gherkin_content;
+        if (!gherkinContent && (!tp.raw_json || Object.keys(tp.raw_json).length === 0)) { newErrors[id] = 'No Gherkin content or TestPlan JSON'; continue; }
         try {
-          const r = await fetch('/api/compile/testplan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(tp.raw_json) });
-          if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || `HTTP ${r.status}`); }
+          const r = gherkinContent
+            ? await fetch('/api/compile', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: gherkinContent })
+            : await fetch('/api/compile/testplan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(tp.raw_json) });
+          if (!r.ok) {
+            const e = await r.json().catch(() => ({}));
+            const details = (e.issues || [])
+              .filter((i: any) => i.severity === 'error')
+              .map((i: any) => `Line ${i.line || '?'}: ${i.message || i.text || JSON.stringify(i)}`)
+              .join('\n');
+            throw new Error(details || e.error || `HTTP ${r.status}`);
+          }
           const blob = await r.blob();
           const buf = await blob.arrayBuffer();
           const arr = new Uint8Array(buf);
@@ -323,7 +335,37 @@ export function ImportIGPage() {
                         </span>
                       ))}
                     </div>
-                    {compileErrors[tp.id] && <div className="text-xs text-red-600 mt-1"><AlertCircle size={10} className="inline mr-1" />{compileErrors[tp.id]}</div>}
+                    {compileErrors[tp.id] && (
+                      <div className="text-xs text-red-600 mt-1">
+                        <AlertCircle size={10} className="inline mr-1" />
+                        <span className="whitespace-pre-line">{compileErrors[tp.id]}</span>
+                        {(() => {
+                          const gherkinSuite = tp.suites?.find((s: any) => s.type === 'gherkin' && s.gherkin_content);
+                          if (!gherkinSuite) return null;
+                          return (
+                            <button
+                              onClick={() => {
+                                const content = gherkinSuite.gherkin_content;
+                                const w = window.open('http://localhost:3000/test-workbench/#import', '_blank');
+                                if (w) {
+                                  // Send content via postMessage once the workbench loads
+                                  const sendContent = () => {
+                                    w.postMessage({ type: 'workbench-import', gherkin: content }, '*');
+                                  };
+                                  // Try multiple times as the page loads
+                                  setTimeout(sendContent, 1000);
+                                  setTimeout(sendContent, 2000);
+                                  setTimeout(sendContent, 3500);
+                                }
+                              }}
+                              className="ml-2 inline-flex items-center gap-1 px-2 py-0.5 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 rounded hover:bg-blue-200 dark:hover:bg-blue-900/50 text-[10px] font-medium"
+                            >
+                              <ExternalLink size={9} /> Debug in Workbench
+                            </button>
+                          );
+                        })()}
+                      </div>
+                    )}
                     {deployErrors[tp.id] && <div className="text-xs text-red-600 mt-1"><AlertCircle size={10} className="inline mr-1" />{deployErrors[tp.id]}</div>}
                   </div>
                 </div>

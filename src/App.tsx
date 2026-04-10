@@ -11,10 +11,13 @@ import { ServicesPage } from './pages/ServicesPage';
 
 interface TreeSpec { apiKey: string; shortName: string; fullName: string; actors: any[]; testSuites: any[]; }
 interface TreeDomain { apiKey: string; shortName: string; fullName: string; specifications: TreeSpec[]; }
-interface TreeData { domains: TreeDomain[]; organisations: any[]; }
+interface TreeSystem { id: number; shortName: string; fullName: string; apiKey: string; }
+interface TreeOrg { apiKey: string; shortName: string; fullName: string; systems: TreeSystem[]; }
+interface TreeCommunity { id: number; apiKey: string; shortName: string; fullName: string; }
+interface TreeData { communities: TreeCommunity[]; domains: TreeDomain[]; organisations: TreeOrg[]; selectedCommunity: { apiKey: string; shortName: string; fullName: string } | null; selectedOrganisation: { apiKey: string; shortName: string; fullName: string } | null; }
 
 function AppShell() {
-  const { isDark, setIsDark, path, navigate, appState, itbConfig, itbSettingsOpen, setITBSettingsOpen, saveConfig,
+  const { isDark, setIsDark, path, navigate, appState, refreshState, itbConfig, itbSettingsOpen, setITBSettingsOpen, saveConfig,
           selectedSpecKey, selectSpec } = useAppContext();
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -36,13 +39,14 @@ function AppShell() {
 
   useEffect(() => { loadTree(); }, []);
 
-  // Auto-expand based on path
+  // Auto-expand based on path and state
   useEffect(() => {
     if (!tree) return;
     const next = new Set(expanded);
-    next.add('testing');
+    next.add('domains');
+    // Show community list if multiple communities or none selected
+    if (tree.communities.length > 1 || !tree.selectedCommunity) next.add('community-list');
     for (const d of tree.domains) {
-      // Expand if path is inside this domain, or if it's the only domain
       if (path.includes(d.apiKey) || d.apiKey === appState.domainKey || tree.domains.length === 1) {
         next.add(`dom-${d.apiKey}`);
       }
@@ -50,6 +54,7 @@ function AppShell() {
         if (path.includes(s.apiKey)) next.add(`spec-${s.apiKey}`);
       }
     }
+    if (tree.organisations.length > 0) next.add('organisations');
     setExpanded(next);
   }, [tree, path, appState.domainKey]);
 
@@ -61,22 +66,66 @@ function AppShell() {
 
   const startAdd = (type: string, parentKey: string) => { setAdding({ type, parentKey }); setAddName(''); setAddError(''); };
   const cancelAdd = () => { setAdding(null); setAddName(''); setAddError(''); };
+
+  const selectDomain = async (domain: TreeDomain) => {
+    await fetch(`/api/set-domain?domain_key=${domain.apiKey}&domain_name=${encodeURIComponent(domain.fullName || domain.shortName)}`, { method: 'POST' });
+    await refreshState();
+  };
+
+  const selectCommunity = async (comm: TreeCommunity) => {
+    await fetch('/api/select-community', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(comm) });
+    // Also push community API key to backend connect so itbFetch picks it up
+    await fetch('/api/connect', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ community_api_key: comm.apiKey }) });
+    await loadTree();
+    await refreshState();
+  };
+
+  const selectOrganisation = async (org: TreeOrg) => {
+    await fetch('/api/select-organisation', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(org) });
+    await fetch('/api/connect', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ organisation_api_key: org.apiKey }) });
+    await refreshState();
+  };
+
   const submitAdd = async () => {
     if (!adding || !addName.trim()) return;
     setAddBusy(true); setAddError('');
     try {
       const base = itbConfig.baseUrl.replace(/\/+$/, '');
       const key = itbConfig.communityApiKey || itbConfig.apiKey || '';
-      if (adding.type === 'domain') {
+      if (adding.type === 'community') {
+        const r = await fetch('/api/communities', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ shortName: addName, fullName: addName }) });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error_description || d.error || 'Failed');
+        // Community created — key auto-stored by backend, refresh to pick it up
+        await refreshState();
+      } else if (adding.type === 'domain') {
         const r = await fetch('/api/domains', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ shortName: addName, fullName: addName, description: '' }) });
         if (!r.ok) { const d = await r.json(); throw new Error(d.error_description || d.error || 'Failed'); }
+        const d = await r.json();
+        if (d.apiKey) {
+          await fetch(`/api/set-domain?domain_key=${d.apiKey}&domain_name=${encodeURIComponent(addName)}`, { method: 'POST' });
+          await refreshState();
+        }
       } else if (adding.type === 'spec') {
         const r = await fetch(`/itb-proxy/${encodeURIComponent(base)}/api/rest/specification`, { method: 'PUT', headers: { 'ITB_API_KEY': key, 'Content-Type': 'application/json' }, body: JSON.stringify({ shortName: addName, fullName: addName, description: '', domain: adding.parentKey, hidden: false, displayOrder: 0 }) });
         if (!r.ok) { const d = await r.json(); throw new Error(d.error_description || d.error || 'Failed'); }
         setExpanded(p => new Set([...p, `dom-${adding.parentKey}`]));
       } else if (adding.type === 'org') {
-        const r = await fetch(`/itb-proxy/${encodeURIComponent(base)}/api/rest/organisation`, { method: 'PUT', headers: { 'ITB_API_KEY': key, 'Content-Type': 'application/json' }, body: JSON.stringify({ shortName: addName, fullName: addName }) });
-        if (!r.ok) { const d = await r.json(); throw new Error(d.error_description || d.error || 'Failed'); }
+        const r = await fetch('/api/organizations', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ shortName: addName, fullName: addName }) });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error_description || d.error || 'Failed');
+        // Org created — key auto-stored by backend
+        await refreshState();
+      } else if (adding.type === 'system') {
+        const orgApiKey = adding.parentKey;
+        const r = await fetch('/api/systems', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ shortName: addName, fullName: addName, description: '', version: '1.0', organisation: orgApiKey }) });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error_description || d.error || 'Failed');
+        // Auto-store system API key in config
+        if (d.apiKey) {
+          saveConfig({ ...itbConfig, systemApiKey: d.apiKey });
+        }
+        setExpanded(p => new Set([...p, `org-${orgApiKey}`]));
       }
       cancelAdd();
       await loadTree();
@@ -160,34 +209,95 @@ function AppShell() {
 
             <div className="my-1.5 mx-3 border-t border-slate-800" />
 
-            {/* Testing tree */}
-            <button onClick={() => toggle('testing')} className="w-full flex items-center gap-1.5 px-3 py-1 text-[10px] text-slate-500 hover:text-slate-300 uppercase tracking-wider font-semibold">
-              {isExp('testing') ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
-              Testing
-              <div className="flex-1" />
-              <span onClick={e => { e.stopPropagation(); startAdd('domain', ''); }} className="p-0.5 hover:text-emerald-400"><Plus size={10} /></span>
-            </button>
+            {/* Community selector */}
+            <div className="px-2 mb-1">
+              {tree?.communities && tree.communities.length > 0 ? (
+                <div>
+                  <button onClick={() => toggle('community-list')} className="w-full flex items-center gap-1.5 px-1 py-1 text-[10px] text-slate-500 hover:text-slate-300 uppercase tracking-wider font-semibold">
+                    {isExp('community-list') ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+                    Community
+                    <div className="flex-1" />
+                    <span onClick={e => { e.stopPropagation(); startAdd('community', ''); }} className="p-0.5 hover:text-emerald-400" title="Create community"><Plus size={10} /></span>
+                  </button>
+                  {isExp('community-list') && (
+                    <div className="ml-2">
+                      {adding?.type === 'community' && <InlineAdd />}
+                      {tree.communities.map(c => {
+                        const isSel = tree.selectedCommunity?.apiKey === c.apiKey;
+                        return (
+                          <button key={c.id} onClick={() => selectCommunity(c)}
+                            className={`w-full flex items-center gap-1.5 px-2 py-1 rounded text-[11px] text-left transition-colors ${isSel ? 'bg-blue-600/30 text-blue-300' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}>
+                            <Users size={10} className={isSel ? 'text-blue-400' : 'text-slate-500'} />
+                            <span className="truncate flex-1">{c.fullName || c.shortName}</span>
+                            {isSel && <Check size={10} className="text-blue-400" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {/* Show selected community name */}
+                  {tree.selectedCommunity && !isExp('community-list') && (
+                    <div className="ml-3 text-[10px] text-blue-400 truncate">{tree.selectedCommunity.fullName || tree.selectedCommunity.shortName}</div>
+                  )}
+                </div>
+              ) : (
+                <div>
+                  <div className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold px-1 py-1">Community</div>
+                  {adding?.type === 'community' ? <InlineAdd /> : (
+                    <button onClick={() => startAdd('community', '')} className="w-full flex items-center gap-1.5 px-2 py-1 text-[11px] text-blue-400 hover:text-blue-300">
+                      <Plus size={10} /> Create community
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
 
-            {isExp('testing') && (
+            <div className="my-1 mx-3 border-t border-slate-800" />
+
+            {/* Domains tree */}
+            <div className="flex items-center gap-1.5 px-3 py-1">
+              <button onClick={() => toggle('domains')} className="flex-shrink-0 p-0.5 text-slate-500 hover:text-slate-300">
+                {isExp('domains') ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+              </button>
+              <button onClick={() => navigate('domains')} className={`text-[10px] uppercase tracking-wider font-semibold ${isActive('domains') ? 'text-white' : 'text-slate-500 hover:text-slate-300'}`}>
+                Domains
+              </button>
+              {/* Show active domain name when collapsed */}
+              {appState.domainKey && !isExp('domains') && (
+                <span className="text-[10px] text-blue-400 truncate flex-1">{appState.domainName || 'Selected'}</span>
+              )}
+              <div className="flex-1" />
+              {tree?.selectedCommunity && (
+                <span onClick={e => { e.stopPropagation(); startAdd('domain', ''); }} className="p-0.5 text-slate-500 hover:text-emerald-400 cursor-pointer" title="Create domain"><Plus size={10} /></span>
+              )}
+            </div>
+
+            {isExp('domains') && (
               <div className="ml-1">
                 {adding?.type === 'domain' && <InlineAdd />}
+
+                {!tree?.selectedCommunity && !tree?.domains?.length && (
+                  <div className="text-[10px] text-slate-600 px-3 py-1 italic">Select a community first</div>
+                )}
 
                 {tree?.domains?.map(domain => {
                   const dk = `dom-${domain.apiKey}`;
                   const domPath = `domain/${domain.apiKey}`;
+                  const isActiveDomain = domain.apiKey === appState.domainKey;
                   return (
                     <div key={domain.apiKey}>
-                      <div className="group flex items-center gap-1 px-2 py-1 hover:bg-slate-800/50 rounded-sm mx-1">
+                      <div className={`group flex items-center gap-1 px-2 py-1 rounded-sm mx-1 ${isActiveDomain ? 'bg-blue-600/20' : 'hover:bg-slate-800/50'}`}>
                         <button onClick={() => toggle(dk)} className="flex-shrink-0">
                           {isExp(dk) ? <ChevronDown size={11} className="text-slate-500" /> : <ChevronRight size={11} className="text-slate-500" />}
                         </button>
-                        <Globe size={11} className="text-blue-400 flex-shrink-0" />
-                        <button onClick={() => navigate(domPath)}
-                          className={`flex-1 text-left text-[12px] truncate ${isActive(domPath) ? 'text-white font-medium' : 'text-slate-300 hover:text-white'}`}>
+                        <Globe size={11} className={isActiveDomain ? 'text-blue-400' : 'text-blue-500/60'} />
+                        <button onClick={() => { selectDomain(domain); navigate(domPath); }}
+                          className={`flex-1 text-left text-[12px] truncate ${isActiveDomain ? 'text-blue-300 font-medium' : isActive(domPath) ? 'text-white font-medium' : 'text-slate-300 hover:text-white'}`}>
                           {domain.fullName || domain.shortName}
                         </button>
+                        {isActiveDomain && <Check size={10} className="text-blue-400 flex-shrink-0" />}
                         <span onClick={e => { e.stopPropagation(); startAdd('spec', domain.apiKey); }}
-                          className="p-0.5 text-slate-600 hover:text-emerald-400 opacity-0 group-hover:opacity-100 cursor-pointer"><Plus size={10} /></span>
+                          className="p-0.5 text-slate-600 hover:text-emerald-400 opacity-0 group-hover:opacity-100 cursor-pointer" title="Add specification"><Plus size={10} /></span>
                       </div>
 
                       {isExp(dk) && (
@@ -257,32 +367,72 @@ function AppShell() {
               </div>
             )}
 
-            <div className="my-1.5 mx-3 border-t border-slate-800" />
+            <div className="my-1 mx-3 border-t border-slate-800" />
 
-            {/* Conformance */}
-            <button onClick={() => toggle('conformance')} className="w-full flex items-center gap-1.5 px-3 py-1 text-[10px] text-slate-500 hover:text-slate-300 uppercase tracking-wider font-semibold">
-              {isExp('conformance') ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
-              Conformance
+            {/* Organisations tree */}
+            <div className="flex items-center gap-1.5 px-3 py-1">
+              <button onClick={() => toggle('organisations')} className="flex-shrink-0 p-0.5 text-slate-500 hover:text-slate-300">
+                {isExp('organisations') ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+              </button>
+              <button onClick={() => navigate('organizations')} className={`text-[10px] uppercase tracking-wider font-semibold ${isActive('organizations') ? 'text-white' : 'text-slate-500 hover:text-slate-300'}`}>
+                Organisations
+              </button>
               <div className="flex-1" />
-              <span onClick={e => { e.stopPropagation(); startAdd('org', ''); }} className="p-0.5 hover:text-emerald-400"><Plus size={10} /></span>
-            </button>
-            {isExp('conformance') && (
+              {tree?.selectedCommunity && (
+                <span onClick={e => { e.stopPropagation(); startAdd('org', ''); }} className="p-0.5 text-slate-500 hover:text-emerald-400 cursor-pointer" title="Create organisation"><Plus size={10} /></span>
+              )}
+            </div>
+            {isExp('organisations') && (
               <div className="ml-1">
                 {adding?.type === 'org' && <InlineAdd />}
-                {tree?.organisations?.map(o => (
-                  <div key={o.shortName} className="flex items-center gap-1.5 px-3 py-0.5 ml-2">
-                    <Building2 size={10} className="text-amber-500" />
-                    <span className="text-[11px] text-slate-400 truncate">{o.fullName || o.shortName}</span>
-                  </div>
-                ))}
-                <button onClick={() => navigate('organizations')}
-                  className={`w-full flex items-center gap-2 pl-5 pr-3 py-1.5 text-[12px] ${isActive('organizations') ? 'bg-blue-600 text-white' : 'text-slate-300 hover:bg-slate-800'}`}>
-                  <Building2 size={13} /> Manage
-                </button>
+
+                {!tree?.selectedCommunity && !tree?.organisations?.length && (
+                  <div className="text-[10px] text-slate-600 px-3 py-1 italic">Select a community first</div>
+                )}
+
+                {tree?.organisations?.map(o => {
+                  const ok = `org-${o.apiKey}`;
+                  const isSel = tree?.selectedOrganisation?.apiKey === o.apiKey;
+                  return (
+                    <div key={o.apiKey}>
+                      <div className="group flex items-center gap-1 px-2 py-1 hover:bg-slate-800/50 rounded-sm mx-1">
+                        <button onClick={() => toggle(ok)} className="flex-shrink-0">
+                          {isExp(ok) ? <ChevronDown size={11} className="text-slate-500" /> : <ChevronRight size={11} className="text-slate-500" />}
+                        </button>
+                        <Building2 size={11} className={isSel ? 'text-amber-400' : 'text-amber-600'} />
+                        <button onClick={() => selectOrganisation(o)}
+                          className={`flex-1 text-left text-[12px] truncate ${isSel ? 'text-amber-300 font-medium' : 'text-slate-300 hover:text-white'}`}>
+                          {o.fullName || o.shortName}
+                        </button>
+                        {isSel && <Check size={10} className="text-amber-400 flex-shrink-0 mr-1" />}
+                        <span onClick={e => { e.stopPropagation(); startAdd('system', o.apiKey); }}
+                          className="p-0.5 text-slate-600 hover:text-emerald-400 opacity-0 group-hover:opacity-100 cursor-pointer" title="Add system"><Plus size={10} /></span>
+                      </div>
+
+                      {isExp(ok) && (
+                        <div className="ml-5 border-l border-slate-800 pl-2 mb-1">
+                          {adding?.type === 'system' && adding.parentKey === o.apiKey && <InlineAdd />}
+                          {o.systems?.map(s => (
+                            <div key={s.apiKey} className="flex items-center gap-1 py-0.5 px-1">
+                              <Laptop size={9} className="text-slate-500" />
+                              <span className="text-[11px] text-slate-400 truncate">{s.fullName || s.shortName}</span>
+                              <span className="text-[9px] text-slate-600 font-mono ml-auto">{s.apiKey.slice(0, 8)}...</span>
+                            </div>
+                          ))}
+                          {(!o.systems || o.systems.length === 0) && !(adding?.type === 'system' && adding.parentKey === o.apiKey) && (
+                            <div className="text-[10px] text-slate-600 px-1 py-0.5">
+                              <button onClick={() => startAdd('system', o.apiKey)} className="text-blue-400 hover:underline">+ Add system</button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
 
-            <div className="my-1.5 mx-3 border-t border-slate-800" />
+            <div className="my-1 mx-3 border-t border-slate-800" />
             <button onClick={() => navigate('services')}
               className={`w-full flex items-center gap-2 px-3 py-1.5 text-[12px] ${isActive('services') ? 'bg-blue-600 text-white' : 'text-slate-300 hover:bg-slate-800'}`}>
               <Container size={13} /> Services

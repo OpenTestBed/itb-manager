@@ -25,10 +25,21 @@
       "Bash(curl -s -X POST http://localhost:3000/api/compile/testplan -H \"Content-Type: application/json\" -d @/c/work/ImplementationGuides/fhir-testing-ig/output/TestPlan-be-vaccination-gherkin.json -o /tmp/testplan-output.zip -w \"%{http_code} %{content_type} %{size_download}\")",
       "Bash(curl -s -X POST http://localhost:3000/api/compile -H \"Content-Type: text/plain\" -d '')",
       "Bash(curl -s -X POST http://localhost:3000/api/compile -H \"Content-Type: text/plain\" -d 'not valid gherkin at all')",
-      "Bash(curl -s -X POST http://localhost:3000/api/compile/testplan -H \"Content-Type: application/json\" -d '{\"resourceType\":\"Patient\"}')"
+      "Bash(curl -s -X POST http://localhost:3000/api/compile/testplan -H \"Content-Type: application/json\" -d '{\"resourceType\":\"Patient\"}')",
+      "Read(//c/work/HOSp/**)",
+      "WebFetch(domain:www.itb.ec.europa.eu)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(curl -s \"https://raw.githubusercontent.com/ISAITB/gitb/master/gitb-ui/conf/application.conf\")",
+      "Read(//c/Users/Jose/.claude/projects/c--work-HOSp-itb-test-manager/**)",
+      "Read(//c/Users/Jose/.itb-test-manager/**)",
+      "Bash(curl -s -X PUT \"http://localhost:10003/api/rest/domain\" -H \"ITB_API_KEY: master-api-key\" -H \"Content-Type: application/json\" -d '{\"shortName\":\"Test\",\"fullName\":\"Test Domain\"}')",
+      "Bash(curl -s -X PUT \"http://localhost:10003/api/rest/system\" -H \"ITB_API_KEY: 3F339F32X9147X4380X91DFX17F662070ABA\" -H \"Content-Type: application/json\" -d '{\"shortName\":\"Test SUT\",\"fullName\":\"Test SUT\",\"description\":\"\",\"version\":\"1.0\",\"organisation\":\"7B307B4CXB56DX42ABX839FXBEEDE32E8A0F\"}')",
+      "Bash(grep -l \"ask user\\\\|inform the user\\\\|lookup.*registry\\\\|resource type should\\\\|FHIRValidator\" public/lang/*.yml public/components/*/en*.yml public/components/*/*.yml)",
+      "Bash(grep -rn \"ask user\\\\|inform.*user\\\\|lookup\\\\|resource.type\\\\|available.at\" /c/work/HOSp/itb-test-manager/dist/components/*/steps.yml)"
     ],
     "additionalDirectories": [
-      "c:\\work\\HOSp\\test-workbench\\src"
+      "c:\\work\\HOSp\\test-workbench\\src",
+      "c:\\work\\HOSp\\itb-starter"
     ]
   }
 }
