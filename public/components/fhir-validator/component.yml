@@ -1,0 +1,39 @@
+# Test Image Component: FHIR Validator
+# Provides FHIR resource validation against profiles and IGs
+id: fhir-validator
+name: FHIR Validator
+version: "1.0"
+description: >
+  FHIR server with $validate support. Validates resources against
+  StructureDefinitions and Implementation Guides.
+
+docker:
+  image: hapiproject/hapi:latest
+  ports:
+    - "8088:8081"
+  environment:
+    - hapi.fhir.validation.enabled=true
+
+healthCheck:
+  method: GET
+  path: /api/validator/definition
+  expect:
+    status: 200
+
+actors:
+  - id: FHIRValidator
+    description: FHIR validation server
+
+services:
+  - handler: FHIRValidator
+    path: /api/validator
+  - handler: FHIRPathProcessor
+    path: /api/fhirpath
+  - handler: MatchetypeProcessor
+    path: /api/matchetype
+  - handler: TestDataGenerator
+    path: /api/testdata
+  - handler: ValidationResultsProcessor
+    path: /api/validation-results
+
+language: steps.yml

@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /c/work/HOSp/test-workbench/public/components -name \"steps.yml\" -exec grep -l \"FHIRPath\" {} \\\\;)",
+      "Bash(grep -n \"single quotes\\\\|\\\\\\\\\\\\\\\\'\\\\|json_string\" /c/work/HOSp/test-workbench/src/parser/gherkinParser.ts /c/work/HOSp/test-workbench/src/parser/xmlGenerator.ts)",
+      "Bash(curl -s http://localhost:8088/openapi.json)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(list\\(d['paths'].keys\\(\\)\\), indent=2\\)\\)\")",
+      "Bash(curl -s -X POST \"http://localhost:8088/loadIG?ig=hl7.fhir.be.core%232.1.2\" -H \"Content-Type: application/fhir+json\")",
+      "Bash(curl -s -X POST \"http://localhost:8088/loadIG?ig=hl7.fhir.be.core%232.1.2\")",
+      "Bash(curl -s -X GET \"http://localhost:8088/loadIG?ig=hl7.fhir.be.core%232.1.2\")",
+      "Bash(curl -s -X POST \"http://localhost:8088/loadIG\" -H \"Content-Type: application/json\" -d '{\"ig\":\"hl7.fhir.be.core#2.1.2\"}')",
+      "Bash(curl -s -X POST \"http://localhost:8088/fhirpath\" -H \"Content-Type: application/json\" -d '{\"resource\":{\"resourceType\":\"Patient\",\"name\":[{\"family\":\"Test\"}]},\"expression\":\"Patient.name.family\"}')",
+      "Bash(curl -s -X POST http://localhost:8088/api/fhirpath/process -H \"Content-Type: application/json\" -d '{\"operation\":\"evaluate\",\"inputs\":{\"resource\":\"{\\\\\"resourceType\\\\\":\\\\\"Patient\\\\\",\\\\\"name\\\\\":[{\\\\\"family\\\\\":\\\\\"Smith\\\\\"}]}\",\"expression\":\"Patient.name.family\"}}')",
+      "Bash(curl -s -X POST http://localhost:8088/api/fhirpath/process -H \"Content-Type: application/json\" -d \"{\\\\\"operation\\\\\":\\\\\"evaluate\\\\\",\\\\\"inputs\\\\\":{\\\\\"resource\\\\\":\\\\\"{\\\\\\\\\\\\\"resourceType\\\\\\\\\\\\\":\\\\\\\\\\\\\"Immunization\\\\\\\\\\\\\",\\\\\\\\\\\\\"performer\\\\\\\\\\\\\":[{\\\\\\\\\\\\\"actor\\\\\\\\\\\\\":{\\\\\\\\\\\\\"identifier\\\\\\\\\\\\\":{\\\\\\\\\\\\\"system\\\\\\\\\\\\\":\\\\\\\\\\\\\"urn:test\\\\\\\\\\\\\",\\\\\\\\\\\\\"value\\\\\\\\\\\\\":\\\\\\\\\\\\\"123\\\\\\\\\\\\\"}}}]}\\\\\",\\\\\"expression\\\\\":\\\\\"performer.actor.identifier.exists\\(\\)\\\\\"}}\")",
+      "Bash(curl -s -X POST http://localhost:8088/api/validator/process -H \"Content-Type: application/json\" -d '{\"operation\":\"loadIG\",\"inputs\":{\"ig\":\"hl7.fhir.be.core#2.1.2\"}}')",
+      "Bash(curl -s -X POST http://localhost:8088/api/validator/process -H \"Content-Type: application/json\" -d '{\"operation\":\"validate\",\"inputs\":{\"resource\":\"{\\\\\"resourceType\\\\\":\\\\\"Patient\\\\\",\\\\\"name\\\\\":[{\\\\\"family\\\\\":\\\\\"Smith\\\\\"}]}\",\"profiles\":\"http://hl7.org/fhir/StructureDefinition/Patient\"}}')",
+      "Bash(curl -s -X POST http://localhost:8088/api/validation-results/process -H \"Content-Type: application/json\" -d '{\"operation\":\"summarize\",\"inputs\":{\"outcome\":\"{\\\\\"resourceType\\\\\":\\\\\"OperationOutcome\\\\\",\\\\\"issue\\\\\":[{\\\\\"severity\\\\\":\\\\\"error\\\\\",\\\\\"code\\\\\":\\\\\"invalid\\\\\",\\\\\"details\\\\\":{\\\\\"text\\\\\":\\\\\"Bad\\\\\"}}]}\"}}')",
+      "Bash(docker inspect:*)",
+      "Bash(docker pull:*)",
+      "Bash(docker compose:*)",
+      "Bash(curl -s \"http://localhost:9000/api/rest\")",
+      "Bash(node -e \"const j=JSON.parse\\(require\\('fs'\\).readFileSync\\('/tmp/itb-openapi.json','utf8'\\)\\);console.log\\(JSON.stringify\\(Object.keys\\(j.paths\\).slice\\(0,30\\),null,2\\)\\)\")",
+      "Bash(curl -s -X POST http://localhost:3000/api/compile -H 'Content-Type: text/plain' -d 'Feature: Test:*)",
+      "Bash(curl -s -X POST http://localhost:3000/api/compile -H \"Content-Type: text/plain\" --data-binary @public/features/be-vaccination.feature -o /tmp/test-output.zip -w \"%{http_code} %{content_type} %{size_download}\")",
+      "Bash(curl -s -X POST http://localhost:3000/api/compile/testplan -H \"Content-Type: application/json\" -d @/c/work/ImplementationGuides/fhir-testing-ig/output/TestPlan-be-vaccination-gherkin.json -o /tmp/testplan-output.zip -w \"%{http_code} %{content_type} %{size_download}\")",
+      "Bash(curl -s -X POST http://localhost:3000/api/compile -H \"Content-Type: text/plain\" -d '')",
+      "Bash(curl -s -X POST http://localhost:3000/api/compile -H \"Content-Type: text/plain\" -d 'not valid gherkin at all')",
+      "Bash(curl -s -X POST http://localhost:3000/api/compile/testplan -H \"Content-Type: application/json\" -d '{\"resourceType\":\"Patient\"}')"
+    ],
+    "additionalDirectories": [
+      "c:\\work\\HOSp\\test-workbench\\src"
+    ]
+  }
+}

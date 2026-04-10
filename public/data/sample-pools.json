@@ -1,0 +1,72 @@
+{
+  "pools": [
+    {
+      "id": "be-patient-basic",
+      "label": "Belgian Patient (basic)",
+      "description": "A simple Belgian patient with SSIN and MRN identifiers",
+      "resources": [
+        {
+          "resourceType": "Patient",
+          "profile": "https://www.ehealth.fgov.be/standards/fhir/core/StructureDefinition/be-patient",
+          "data": {
+            "family": "Dupont",
+            "given": "Marie",
+            "gender": "female",
+            "birthDate": "1985-03-15",
+            "ssin": "85031512345",
+            "mrn": "MRN-001"
+          }
+        }
+      ]
+    },
+    {
+      "id": "be-patient-multi",
+      "label": "Belgian Patients (multiple)",
+      "description": "Multiple Belgian patients for batch testing",
+      "resources": [
+        {
+          "resourceType": "Patient",
+          "profile": "https://www.ehealth.fgov.be/standards/fhir/core/StructureDefinition/be-patient",
+          "data": {
+            "family": "Dupont",
+            "given": "Marie",
+            "gender": "female",
+            "birthDate": "1985-03-15",
+            "ssin": "85031512345",
+            "mrn": "MRN-001"
+          }
+        },
+        {
+          "resourceType": "Patient",
+          "profile": "https://www.ehealth.fgov.be/standards/fhir/core/StructureDefinition/be-patient",
+          "data": {
+            "family": "Janssens",
+            "given": "Pieter",
+            "gender": "male",
+            "birthDate": "1990-07-22",
+            "ssin": "90072254321",
+            "mrn": "MRN-002"
+          }
+        }
+      ]
+    },
+    {
+      "id": "be-allergy",
+      "label": "Belgian Allergy",
+      "description": "Allergy intolerance resources for Belgian profile testing",
+      "resources": [
+        {
+          "resourceType": "AllergyIntolerance",
+          "profile": "https://www.ehealth.fgov.be/standards/fhir/core/StructureDefinition/be-allergyintolerance",
+          "data": {
+            "codeCode": "762952008",
+            "codeDisplay": "Peanut",
+            "codeText": "Peanut allergy",
+            "reactionCode": "39579001",
+            "reactionDisplay": "Anaphylaxis"
+          }
+        }
+      ]
+    }
+  ]
+}

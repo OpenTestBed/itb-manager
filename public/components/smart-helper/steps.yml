@@ -1,0 +1,72 @@
+# Language extension for SMART Helper component
+# Provides IG loading and FHIR validation via HTTP actors
+id: smart-helper
+name: SMART Helper Steps
+description: >
+  Steps for uploading Implementation Guides and validating
+  FHIR resources against profiles via actor-relative endpoints.
+
+steps:
+  # Load IG on an actor (with optional target, defaults to "fhir")
+  - match: '^([A-Za-z][A-Za-z0-9_]*) loads IG "([^"]+)" (?:target "([^"]+)" )?on ([A-Za-z][A-Za-z0-9_]*)$'
+    actions:
+      - assign:
+          to: 'igParams{url}'
+          value: '"$2"'
+      - assign:
+          to: 'igParams{target}'
+          value: '"$3"'
+      - assign:
+          to: 'igTpl'
+          value: >-
+            '{"ig_url":"${url}", "target":"${target}"}'
+      - process:
+          handler: 'TemplateProcessor'
+          operation: 'process'
+          output: 'igBody'
+          inputs:
+            syntax: '"freemarker"'
+            template: '$igTpl'
+            parameters: '$igParams'
+      - assign:
+          to: 'igHeaders{Content-Type}'
+          value: '"application/json"'
+      - assign:
+          to: 'igHeaders{Accept}'
+          value: '"application/json"'
+      - send:
+          id: 'lastRequest'
+          desc: 'Upload IG'
+          handler: 'HttpMessagingV2'
+          from: '$1'
+          to: '$4'
+          inputs:
+            uri: 'concat($$4Base, "/upload_ig")'
+            method: '"POST"'
+            headers: '$igHeaders'
+            body: '$igBody'
+
+  # Validate a resource against a profile on an actor (FHIR $validate)
+  - match: '^([A-Za-z][A-Za-z0-9_]*) validates "([^"]+)" against "([^"]+)" on ([A-Za-z][A-Za-z0-9_]*)$'
+    actions:
+      - assign:
+          to: 'valHeaders{Content-Type}'
+          value: '"application/fhir+json"'
+      - assign:
+          to: 'valHeaders{Accept}'
+          value: '"application/fhir+json"'
+      - assign:
+          to: 'valParams{profile}'
+          value: '"$3"'
+      - send:
+          id: 'lastRequest'
+          desc: 'FHIR $validate'
+          handler: 'HttpMessagingV2'
+          from: '$1'
+          to: '$4'
+          inputs:
+            uri: 'concat($$4Base, "/Bundle/$validate")'
+            method: '"POST"'
+            headers: '$valHeaders'
+            parameters: '$valParams'
+            body: '$$2'

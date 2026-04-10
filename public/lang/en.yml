@@ -1,0 +1,326 @@
+version: 1
+locale: en
+
+# ====================================================================
+# FHIR Gherkin Dialect — Core Language
+# ====================================================================
+# All values in "quotes". Reserved names in assertions:
+#   "response status", "response", "validation errors",
+#   "validation warnings", "validation outcome", "validation severity"
+# ====================================================================
+
+steps:
+
+  # ==================================================================
+  # 1. ACTORS
+  # ==================================================================
+  # <Actor> is the system under test [at <endpoint>] [as defined by <canonical>]
+  # <Actor> is available [as "<name>"] [at <endpoint>] [as defined by <canonical>]
+
+  - match: '^([A-Za-z][A-Za-z0-9_]*) is the system under test (?:on|at) "?(https?://[^"\s]+)"? as defined by "?(https?://[^"\s]+)"?$'
+    actions:
+      - declareActor: { id: '$1', role: 'SUT', endpoint: '$2', canonical: '$3' }
+      - assign: { to: '$1Base', value: '"$2"' }
+
+  - match: '^([A-Za-z][A-Za-z0-9_]*) is the system under test (?:on|at) "?(https?://[^"\s]+)"?$'
+    actions:
+      - declareActor: { id: '$1', role: 'SUT', endpoint: '$2' }
+      - assign: { to: '$1Base', value: '"$2"' }
+
+  - match: '^([A-Za-z][A-Za-z0-9_]*) is the system under test as defined by "?(https?://[^"\s]+)"?$'
+    actions:
+      - declareActor: { id: '$1', role: 'SUT', canonical: '$2' }
+
+  - match: '^([A-Za-z][A-Za-z0-9_]*) is the system under test$'
+    actions:
+      - declareActor: { id: '$1', role: 'SUT' }
+
+  - match: '^([A-Za-z][A-Za-z0-9_]*) is available (?:on|at) "?(https?://[^"\s]+)"? as defined by "?(https?://[^"\s]+)"?$'
+    actions:
+      - declareActor: { id: '$1', endpoint: '$2', canonical: '$3' }
+      - assign: { to: '$1Base', value: '"$2"' }
+
+  - match: '^([A-Za-z][A-Za-z0-9_]*) is available (?:on|at) "?(https?://[^"\s]+)"?$'
+    actions:
+      - declareActor: { id: '$1', endpoint: '$2' }
+      - assign: { to: '$1Base', value: '"$2"' }
+
+  - match: '^([A-Za-z][A-Za-z0-9_]*) is available as defined by "?(https?://[^"\s]+)"?$'
+    actions:
+      - declareActor: { id: '$1', canonical: '$2' }
+
+  - match: '^([A-Za-z][A-Za-z0-9_]*) is available as "([^"]+)"$'
+    actions:
+      - declareActor: { id: '$1', name: '$2' }
+
+  - match: '^([A-Za-z][A-Za-z0-9_]*) is available$'
+    actions:
+      - declareActor: { id: '$1' }
+
+  # ==================================================================
+  # 2. HTTP REQUESTS
+  # ==================================================================
+  # <Actor> posts|puts to <Actor> at "<path>" with: (docstring)
+  # <Actor> patches on <Actor> at "<path>" with: (docstring)
+  # <Actor> deletes on <Actor> at "<path>"
+  # <Actor> gets "<url>" as "<variable>"
+  # set header "<name>" to "<value>"
+
+  # Set a custom header (persists for subsequent requests)
+  - match: '^set header "([^"]+)" to "([^"]+)"$'
+    actions:
+      - assign: { to: 'jsonHeaders{$1}', value: '"$2"' }
+
+  # POST with body
+  - match: '^([A-Za-z][A-Za-z0-9_]*) posts to ([A-Za-z][A-Za-z0-9_]*) at "([^"]+)" with:$'
+    actions:
+      - assign: { to: 'jsonHeaders{Content-Type}', value: '"application/json"' }
+      - assign: { to: 'jsonHeaders{Accept}', value: '"application/json"' }
+      - send:
+          id: 'lastRequest'
+          desc: 'POST'
+          handler: 'HttpMessagingV2'
+          from: '$1'
+          to: '$2'
+          inputs:
+            uri: 'concat($$2Base, "$3")'
+            method: '"POST"'
+            headers: '$jsonHeaders'
+            body: '$docString'
+
+  # PUT with body
+  - match: '^([A-Za-z][A-Za-z0-9_]*) puts to ([A-Za-z][A-Za-z0-9_]*) at "([^"]+)" with:$'
+    actions:
+      - assign: { to: 'jsonHeaders{Content-Type}', value: '"application/json"' }
+      - assign: { to: 'jsonHeaders{Accept}', value: '"application/json"' }
+      - send:
+          id: 'lastRequest'
+          desc: 'PUT'
+          handler: 'HttpMessagingV2'
+          from: '$1'
+          to: '$2'
+          inputs:
+            uri: 'concat($$2Base, "$3")'
+            method: '"PUT"'
+            headers: '$jsonHeaders'
+            body: '$docString'
+
+  # PATCH with body
+  - match: '^([A-Za-z][A-Za-z0-9_]*) patches on ([A-Za-z][A-Za-z0-9_]*) at "([^"]+)" with:$'
+    actions:
+      - assign: { to: 'jsonHeaders{Content-Type}', value: '"application/json-patch+json"' }
+      - assign: { to: 'jsonHeaders{Accept}', value: '"application/json"' }
+      - send:
+          id: 'lastRequest'
+          desc: 'PATCH'
+          handler: 'HttpMessagingV2'
+          from: '$1'
+          to: '$2'
+          inputs:
+            uri: 'concat($$2Base, "$3")'
+            method: '"PATCH"'
+            headers: '$jsonHeaders'
+            body: '$docString'
+
+  # DELETE
+  - match: '^([A-Za-z][A-Za-z0-9_]*) deletes on ([A-Za-z][A-Za-z0-9_]*) at "([^"]+)"$'
+    actions:
+      - assign: { to: 'jsonHeaders{Accept}', value: '"application/json"' }
+      - send:
+          id: 'lastRequest'
+          desc: 'DELETE'
+          handler: 'HttpMessagingV2'
+          from: '$1'
+          to: '$2'
+          inputs:
+            uri: 'concat($$2Base, "$3")'
+            method: '"DELETE"'
+            headers: '$jsonHeaders'
+
+  # GET and store result
+  - match: '^([A-Za-z][A-Za-z0-9_]*) gets "([^"]+)" as "([A-Za-z_][A-Za-z0-9_]*)"$'
+    actions:
+      - assign: { to: 'jsonHeaders{Accept}', value: '"application/json"' }
+      - send:
+          id: 'lastRequest'
+          desc: 'GET'
+          handler: 'HttpMessagingV2'
+          from: '$1'
+          inputs:
+            uri: '"$2"'
+            method: '"GET"'
+            headers: '$jsonHeaders'
+      - assign: { to: '$3', value: '$lastRequest{response}{body}' }
+
+  # ==================================================================
+  # 3. VARIABLES
+  # ==================================================================
+  # set "<variable>" to "<value>"
+  # set "<variable>" to: (docstring)
+  # extract "<pointer>" [from "<variable>"] as "<variable>"
+
+  - match: '^set "([A-Za-z_][A-Za-z0-9_]*)" to "([^"]+)"$'
+    actions:
+      - assign: { to: '$1', value: '"$2"' }
+
+  - match: '^set "([A-Za-z_][A-Za-z0-9_]*)" to:$'
+    actions:
+      - assign: { to: '$1', value: '$docString' }
+
+  - match: '^extract "([^"]+)" from "([A-Za-z_][A-Za-z0-9_]*)" as "([A-Za-z_][A-Za-z0-9_]*)"$'
+    actions:
+      - process:
+          handler: 'JsonPointerProcessor'
+          operation: 'process'
+          output: '$3'
+          inputs: { content: '$$2', pointer: '"$1"' }
+
+  - match: '^extract "([^"]+)" as "([A-Za-z_][A-Za-z0-9_]*)"$'
+    actions:
+      - process:
+          handler: 'JsonPointerProcessor'
+          operation: 'process'
+          output: '$2'
+          inputs: { content: '$lastRequest{response}{body}', pointer: '"$1"' }
+
+  # ==================================================================
+  # 4. WAIT / RECEIVE
+  # ==================================================================
+  # <Actor> waits for <Actor> [within <number> seconds]
+  # <Actor> waits for <Actor> matching "<pattern>" [within <number> seconds]
+
+  # Wait for any message from an actor (with timeout)
+  - match: '^([A-Za-z][A-Za-z0-9_]*) waits for ([A-Za-z][A-Za-z0-9_]*) within ([0-9]+) seconds$'
+    actions:
+      - receive:
+          id: 'lastReceived'
+          desc: 'Wait for message'
+          handler: 'HttpMessagingV2'
+          from: '$2'
+          to: '$1'
+          inputs: { timeout: '"$3"' }
+
+  # Wait for any message from an actor (default timeout)
+  - match: '^([A-Za-z][A-Za-z0-9_]*) waits for ([A-Za-z][A-Za-z0-9_]*)$'
+    actions:
+      - receive:
+          id: 'lastReceived'
+          desc: 'Wait for message'
+          handler: 'HttpMessagingV2'
+          from: '$2'
+          to: '$1'
+          inputs: { timeout: '"60"' }
+
+  # ==================================================================
+  # 5. CONDITIONALS (single-line guard)
+  # ==================================================================
+  # if "<variable>" is not empty then "<variable>" should be "<value>"
+  # if "<variable>" is "<value>" then "<variable>" should be "<value>"
+
+  # Conditional: if not empty, then assert equals
+  - match: '^if "([^"]+)" is not empty then "([^"]+)" should be "([^"]+)"$'
+    actions:
+      - verify:
+          handler: 'ExpressionValidator'
+          desc: 'Conditional assertion'
+          inputs: { expression: '($$1 = "") or ($$2 = "$3")' }
+
+  # Conditional: if equals, then assert equals
+  - match: '^if "([^"]+)" is "([^"]+)" then "([^"]+)" should be "([^"]+)"$'
+    actions:
+      - verify:
+          handler: 'ExpressionValidator'
+          desc: 'Conditional assertion'
+          inputs: { expression: 'not($$1 = "$2") or ($$3 = "$4")' }
+
+  # Conditional: if not empty, then assert contains
+  - match: '^if "([^"]+)" is not empty then "([^"]+)" should contain "([^"]+)"$'
+    actions:
+      - verify:
+          handler: 'ExpressionValidator'
+          desc: 'Conditional assertion'
+          inputs: { expression: '($$1 = "") or contains($$2, "$3")' }
+
+  # ==================================================================
+  # 6. ASSERTIONS
+  # ==================================================================
+  # "<variable>" should be "<value>"
+  # "<variable>" should not be "<value>"
+  # "<variable>" should contain "<value>"
+  # "<variable>" should not be empty
+  # Reserved names: "response status", "response", "validation errors", etc.
+
+  - match: '^"([^"]+)" should be "([^"]+)"$'
+    actions:
+      - verify:
+          handler: 'StringValidator'
+          desc: 'Equals'
+          inputs: { actualstring: '$$1', expectedstring: '"$2"' }
+
+  - match: '^"([^"]+)" should not be "([^"]+)"$'
+    actions:
+      - verify:
+          handler: 'ExpressionValidator'
+          desc: 'Not equals'
+          inputs: { expression: 'not($$1 = "$2")' }
+
+  - match: '^"([^"]+)" should contain "([^"]+)"$'
+    actions:
+      - verify:
+          handler: 'StringValidator'
+          desc: 'Contains'
+          inputs: { actualstring: '$$1', expectedstring: '"$2"', matchType: '"contains"' }
+
+  - match: '^"([^"]+)" should not be empty$'
+    actions:
+      - verify:
+          handler: 'StringValidator'
+          desc: 'Not empty'
+          inputs: { actualstring: '$$1', expectedstring: '"not-null"' }
+
+  # ==================================================================
+  # 7. INTERACTION
+  # ==================================================================
+  # <Actor> is informed "<message>" [with "<content>"]
+  # <Actor> is asked for "<variable>" [with "<message>"]
+
+  - match: '^([A-Za-z][A-Za-z0-9_]*) is informed "([^"]+)" with "([^"]+)"$'
+    actions:
+      - call:
+          path: scriptlets/instructUser.xml
+          inputs: { step: '"inform"', actor: '"$1"', message: '"$2"', content: '"$3"' }
+
+  - match: '^([A-Za-z][A-Za-z0-9_]*) is informed "(.+)"$'
+    actions:
+      - call:
+          path: scriptlets/instructUser.xml
+          inputs: { step: '"inform"', actor: '"$1"', message: '"$2"' }
+
+  - match: '^([A-Za-z][A-Za-z0-9_]*) is asked for "([A-Za-z_][A-Za-z0-9_]*)" with "([^"]+)"$'
+    actions:
+      - declareVariable: { name: '$2', varType: 'string' }
+      - interact:
+          id: 'ask'
+          desc: '$3'
+          inputTitle: '$3'
+          requests:
+            - { desc: '$3', name: '$2', inputType: 'UPLOAD', required: true, variable: '$$2' }
+
+  - match: '^([A-Za-z][A-Za-z0-9_]*) is asked for "([A-Za-z_][A-Za-z0-9_]*)"$'
+    actions:
+      - declareVariable: { name: '$2', varType: 'string' }
+      - interact:
+          id: 'ask'
+          desc: 'Provide input'
+          inputTitle: 'Provide input'
+          requests:
+            - { desc: 'Provide input:', name: '$2', inputType: 'UPLOAD', required: true, variable: '$$2' }
+
+  # ==================================================================
+  # 8. LOGGING
+  # ==================================================================
+  # log "<message>"
+
+  - match: '^log "([^"]+)"$'
+    actions:
+      - log: '"$1"'

@@ -1,0 +1,26 @@
+# Test Image Component: SMART Helper
+# Provides IG loading and SMART-on-FHIR support utilities
+id: smart-helper
+name: SMART Helper
+version: "1.0"
+description: >
+  Helper service for SMART-on-FHIR testing. Supports uploading
+  Implementation Guides and preparing SMART app launch contexts.
+
+docker:
+  image: isipfoundation/smart-helper:latest
+  ports:
+    - "8000:8000"
+  environment: []
+
+healthCheck:
+  method: GET
+  path: /health
+  expect:
+    status: 200
+
+actors:
+  - id: SmartHelper
+    description: SMART-on-FHIR helper service
+
+language: steps.yml

@@ -1,0 +1,42 @@
+# Test Image Component: HCERT Decoder
+# Provides QR code decoding, COSE signature verification, VHL/SHL processing
+id: hcert-decoder
+name: HCERT Decoder
+version: "1.0"
+description: >
+  Decodes health certificate QR codes (EU DCC, SMART Health Cards, VHL/SHL).
+  Supports COSE signature verification, HCERT payload extraction, and
+  Verifiable Health Link (VHL) authorization and FHIR resource retrieval.
+
+# Docker configuration for deploying this test image
+docker:
+  image: isipfoundation/hcert-validator:latest
+  ports:
+    - "8089:8080"
+  environment:
+    - SPRING_PROFILES_ACTIVE=default
+  volumes: []
+
+# Health check endpoint — used by the workbench to verify the component is running
+healthCheck:
+  method: GET
+  path: /health
+  expect:
+    status: 200
+
+# Actors this component provides (test infrastructure roles)
+actors:
+  - id: HCertDecoder
+    description: Decodes QR images and verifies COSE signatures
+  - id: VHLResponder
+    description: Handles VHL/SHL authorization and FHIR retrieval
+
+# Language extension — loaded and merged into the step catalog
+language: steps.yml
+
+# Scriptlets — reusable TDL XML functions included in generated test suites
+# (kept for reference / future use by other features)
+scriptlets:
+  - buildJsonBody.xml
+  - multipartUpload.xml
+  - postJson.xml

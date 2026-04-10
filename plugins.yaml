@@ -1,0 +1,281 @@
+# ITB Plugin Catalog
+# Each plugin defines a service that can be used with the Interoperability Test Bed.
+# The app probes health endpoints to detect running services and shows
+# docker-compose snippets for services that need to be installed.
+
+plugins:
+
+  # ── Core ITB Services (always required) ──
+
+  - id: gitb-ui
+    name: ITB Web Interface
+    category: core
+    description: The main ITB user interface and REST API
+    container: gitb-ui
+    image: isaitb/gitb-ui:nightly
+    port: 10003
+    internalPort: 9000
+    healthCheck:
+      url: "http://localhost:10003"
+      method: GET
+      expect: 200
+
+  - id: gitb-srv
+    name: ITB Backend Server
+    category: core
+    description: GITB test execution engine
+    container: gitb-srv
+    image: isaitb/gitb-srv:nightly
+    healthCheck: null  # no external endpoint
+
+  - id: gitb-mysql
+    name: ITB Database
+    category: core
+    description: MySQL database for ITB persistence
+    container: gitb-mysql
+    image: isaitb/gitb-mysql:latest
+    port: 3306
+    healthCheck: null  # checked via docker
+
+  - id: gitb-redis
+    name: ITB Cache
+    category: core
+    description: Redis cache for ITB sessions
+    container: gitb-redis
+    image: redis:7.2.5
+    port: 6379
+    healthCheck: null
+
+  # ── FHIR Validation Services ──
+
+  - id: fhir-validator
+    name: HL7 FHIR Validator
+    category: validation
+    description: >
+      HL7 FHIR Validator CLI running as an HTTP service.
+      Validates FHIR resources against profiles, evaluates FHIRPath, generates test data.
+    container: fhir-validator
+    image: costateixeira/fhir-validator:latest
+    port: 8088
+    internalPort: 8081
+    healthCheck:
+      url: "http://localhost:8088/validateResource"
+      method: POST
+      headers:
+        Content-Type: application/fhir+json
+      body: '{"resourceType":"Patient"}'
+      expect: 200
+    endpoints:
+      - path: /validateResource
+        method: POST
+        description: Validate a FHIR resource
+      - path: /fhirpath
+        method: POST
+        description: Evaluate FHIRPath expression
+      - path: /testdata
+        method: POST
+        description: Generate test data from profile
+      - path: /loadIG
+        method: POST
+        description: Load Implementation Guide
+    dockerCompose: |
+      fhir-validator:
+        image: costateixeira/fhir-validator:latest
+        container_name: fhir-validator
+        restart: unless-stopped
+        ports:
+          - "8088:8081"
+        environment:
+          - JAVA_TOOL_OPTIONS=-Xmx2g
+        healthcheck:
+          test: ["CMD-SHELL", "curl -sf -X POST http://localhost:8081/validateResource -H 'Content-Type: application/fhir+json' -d '{\"resourceType\":\"Patient\"}' || exit 1"]
+          interval: 30s
+          timeout: 10s
+          retries: 5
+          start_period: 120s
+
+  # ── FHIR Server ──
+
+  - id: fhir-server
+    name: HAPI FHIR Server
+    category: fhir
+    description: >
+      HAPI FHIR R4 server. Stores and serves FHIR resources.
+      Supports runtime IG upload and FHIRPath evaluation.
+    container: fhir-server
+    image: hapiproject/hapi:latest
+    port: 8080
+    healthCheck:
+      url: "http://localhost:8080/fhir/metadata"
+      method: GET
+      expect: 200
+    endpoints:
+      - path: /fhir/metadata
+        method: GET
+        description: FHIR CapabilityStatement
+      - path: /fhir/{ResourceType}
+        method: GET/POST
+        description: FHIR CRUD operations
+    dockerCompose: |
+      fhir-server:
+        image: hapiproject/hapi:latest
+        restart: unless-stopped
+        environment:
+          - hapi.fhir.cr.enabled=true
+          - hapi.fhir.allow_multiple_delete=true
+          - hapi.fhir.ig_runtime_upload_enabled=true
+        ports:
+          - "8080:8080"
+        healthcheck:
+          test: ["CMD-SHELL", "curl -fsS http://localhost:8080/fhir/metadata >/dev/null || exit 1"]
+          interval: 15s
+          timeout: 5s
+          retries: 20
+
+  # ── StructureMap / Matchbox ──
+
+  - id: matchbox
+    name: Matchbox FHIR Server
+    category: fhir
+    description: >
+      Matchbox FHIR server with StructureMap execution support.
+      Used for FHIR resource transformation (e.g. CDA to FHIR, ICVP to IPS).
+    container: matchbox
+    image: europe-west6-docker.pkg.dev/ahdis-ch/ahdis/matchbox:v4.0.12
+    port: 8087
+    internalPort: 8080
+    healthCheck:
+      url: "http://localhost:8087/matchboxv3/fhir/metadata"
+      method: GET
+      expect: 200
+    endpoints:
+      - path: /matchboxv3/fhir/metadata
+        method: GET
+        description: FHIR CapabilityStatement
+      - path: /matchboxv3/fhir/StructureMap/$transform
+        method: POST
+        description: Execute StructureMap transformation
+    requires:
+      - matchbox-db
+    dockerCompose: |
+      matchbox:
+        image: europe-west6-docker.pkg.dev/ahdis-ch/ahdis/matchbox:v4.0.12
+        restart: unless-stopped
+        ports:
+          - "8087:8080"
+        links:
+          - matchbox-db
+        volumes:
+          - ./matchbox/config:/config
+        healthcheck:
+          test: ["CMD-SHELL", "curl -fsS http://localhost:8080/fhir/metadata >/dev/null || exit 1"]
+          interval: 15s
+          timeout: 5s
+          retries: 20
+
+      matchbox-db:
+        image: postgres:latest
+        container_name: matchbox-db
+        restart: always
+        ports:
+          - "5432:5432"
+        environment:
+          POSTGRES_DB: matchbox
+          POSTGRES_USER: matchbox
+          POSTGRES_PASSWORD: matchbox
+        volumes:
+          - pgdata:/var/lib/postgresql/data
+
+  # ── HCERT / Digital Health Certificates ──
+
+  - id: hcert-validator
+    name: GDHCN HCERT Validator
+    category: certificates
+    description: >
+      Validates HCERT/DDCC digital health certificates.
+      Decodes QR codes, verifies COSE signatures against GDHCN trust lists,
+      processes Smart Health Links (SHLink).
+    container: hcert-validator
+    image: costateixeira/gdhcn-validator:latest
+    port: 8089
+    internalPort: 8080
+    healthCheck:
+      url: "http://localhost:8089/health"
+      method: GET
+      expect: 200
+    endpoints:
+      - path: /health
+        method: GET
+        description: Health check
+      - path: /decode
+        method: POST
+        description: Decode barcode image
+      - path: /hc1/decode
+        method: POST
+        description: Decode HC1 string
+      - path: /verify
+        method: POST
+        description: Verify COSE signature
+    dockerCompose: |
+      hcert-validator:
+        build: gdhcn-helper
+        container_name: hcert-validator
+        restart: unless-stopped
+        ports:
+          - "8089:8080"
+        environment:
+          - PYTHONUNBUFFERED=1
+        healthcheck:
+          test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+          interval: 30s
+          timeout: 10s
+          retries: 3
+
+  # ── SMART Helper ──
+
+  - id: smart-helper
+    name: SMART Helper
+    category: fhir
+    description: >
+      Bridges ITB with Matchbox and FHIR servers.
+      Handles IG upload, StructureMap execution, and FHIR resource validation.
+    container: smart-helper
+    image: null  # built from local source
+    port: 8000
+    healthCheck:
+      url: "http://localhost:8000/health"
+      method: GET
+      expect: 200
+    endpoints:
+      - path: /health
+        method: GET
+        description: Health check
+      - path: /ig/
+        method: POST
+        description: Upload Implementation Guide
+      - path: /validate
+        method: POST
+        description: Validate FHIR resource
+      - path: /structuremap/
+        method: POST
+        description: StructureMap operations
+    requires:
+      - fhir-server
+      - matchbox
+    dockerCompose: |
+      smart-helper:
+        build:
+          context: ./smart-helper
+          dockerfile: Dockerfile
+        container_name: smart-helper
+        environment:
+          - FHIR_HOST=http://fhir-server:8080/fhir
+          - MATCHBOX_HOST=http://matchbox:8080/matchboxv3/fhir
+          - FHIR_TIMEOUT=90
+        ports:
+          - "8000:8000"
+        healthcheck:
+          test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health >/dev/null || exit 1"]
+          interval: 10s
+          timeout: 5s
+          retries: 20
