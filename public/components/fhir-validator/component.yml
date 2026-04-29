@@ -16,7 +16,7 @@ docker:
 
 healthCheck:
   method: GET
-  path: /api/validator/definition
+  path: /itb/fhir/definition
   expect:
     status: 200
 
@@ -26,14 +26,14 @@ actors:
 
 services:
   - handler: FHIRValidator
-    path: /api/validator
+    path: /itb/fhir
   - handler: FHIRPathProcessor
-    path: /api/fhirpath
+    path: /itb/fhirpath
   - handler: MatchetypeProcessor
-    path: /api/matchetype
+    path: /itb/matchetype
   - handler: TestDataGenerator
-    path: /api/testdata
+    path: /itb/testdata
   - handler: ValidationResultsProcessor
-    path: /api/validation-results
+    path: /itb/validationResults
 
 language: steps.yml

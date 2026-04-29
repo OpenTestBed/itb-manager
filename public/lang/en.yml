@@ -271,12 +271,67 @@ steps:
           desc: 'Contains'
           inputs: { actualstring: '$$1', expectedstring: '"$2"', matchType: '"contains"' }
 
+  - match: '^"([^"]+)" should not contain "([^"]+)"$'
+    actions:
+      - verify:
+          handler: 'ExpressionValidator'
+          desc: 'Does not contain'
+          inputs: { expression: 'not(contains($$1, "$2"))' }
+
   - match: '^"([^"]+)" should not be empty$'
     actions:
       - verify:
           handler: 'StringValidator'
           desc: 'Not empty'
           inputs: { actualstring: '$$1', expectedstring: '"not-null"' }
+
+  # "<var>" should be a valid <Type> resource
+  # Validates the resource against the base FHIR profile for the given type
+  # (http://hl7.org/fhir/StructureDefinition/<Type>) and asserts no errors.
+  - match: '^"([^"]+)" should be a valid (\S+) resource$'
+    actions:
+      - assign:
+          to: 'fhirValidatorHeaders{Content-Type}'
+          value: '"application/json"'
+      - assign:
+          to: 'fhirValidatorHeaders{Accept}'
+          value: '"application/json"'
+      - assign:
+          to: 'validateTplParams{resource}'
+          value: '$$1'
+      - assign:
+          to: 'validateTplParams{resourceType}'
+          value: '"$2"'
+      - process:
+          handler: 'TemplateProcessor'
+          operation: 'process'
+          output: 'validateBody'
+          inputs:
+            syntax: '"freemarker"'
+            template: "'{ \"input\": [ { \"name\": \"contentToValidate\", \"value\": \"${resource?json_string}\", \"embeddingMethod\": \"STRING\" }, { \"name\": \"profiles\", \"value\": \"http://hl7.org/fhir/StructureDefinition/${resourceType}\", \"embeddingMethod\": \"STRING\" } ] }'"
+            parameters: '$validateTplParams'
+      - send:
+          id: 'lastRequest'
+          desc: 'Validate against base FHIR profile for $2'
+          handler: 'HttpMessagingV2'
+          inputs:
+            uri: 'concat($FHIRValidatorBase, "/itb/fhir/validate")'
+            method: '"POST"'
+            headers: '$fhirValidatorHeaders'
+            body: '$validateBody'
+      - process:
+          handler: 'JsonPointerProcessor'
+          operation: 'process'
+          output: 'validationErrors'
+          inputs:
+            content: '$lastRequest{response}{body}'
+            pointer: '"/report/context/0/value"'
+      - verify:
+          handler: 'StringValidator'
+          desc: '$1 is a valid $2 resource'
+          inputs:
+            actualstring: '$validationErrors'
+            expectedstring: '"0"'
 
   # ==================================================================
   # 7. INTERACTION
