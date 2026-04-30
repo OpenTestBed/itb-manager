@@ -243,7 +243,75 @@ function collectVariables(ir: IRAction[]): DeclaredVariable[] {
     }
   }
 
+  // 6. Variables *referenced* in step expressions (e.g. $FHIRValidatorBase) that
+  // weren't declared anywhere else. ITB requires every $var to be declared in
+  // <variables> or implicitly created by a step; otherwise import fails with TDL-040.
+  for (const name of collectReferencedVars(ir)) {
+    if (!seen.has(name)) {
+      seen.add(name);
+      vars.push({ name, varType: 'string' });
+    }
+  }
+
   return vars;
+}
+
+/** TDL builtins / iterator vars that are implicitly available — never declare. */
+const RESERVED_VAR_NAMES = new Set([
+  'row',         // <foreach> iterator
+  'tableRows',   // table rows in <foreach from="$tableRows">
+  'docString',   // Gherkin doc-string content
+  'iterator',    // some <foreach> variants
+]);
+
+/**
+ * Walk the IR and collect every $identifier referenced in string-valued fields
+ * (inputs, assign values, log values, etc.). Used to synthesize <var> declarations
+ * for references that aren't otherwise declared.
+ */
+function collectReferencedVars(ir: IRAction[]): Set<string> {
+  const refs = new Set<string>();
+
+  const scan = (s: string | undefined) => {
+    if (!s) return;
+    // Match $identifier — but NOT ${...} (freemarker template syntax inside
+    // string templates, where ${name} is the freemarker var, not a TDL ref).
+    const re = /\$(?!\{)([A-Za-z_]\w*)/g;
+    let m;
+    while ((m = re.exec(s)) !== null) {
+      const name = m[1];
+      if (!RESERVED_VAR_NAMES.has(name)) refs.add(name);
+    }
+  };
+
+  const scanInputs = (inputs?: Record<string, string>) => {
+    if (!inputs) return;
+    for (const v of Object.values(inputs)) scan(v);
+  };
+
+  const walk = (actions: IRAction[]) => {
+    for (const a of actions) {
+      if (a.type === 'send' || a.type === 'receive' || a.type === 'verify' || a.type === 'process' || a.type === 'call') {
+        scanInputs(a.inputs);
+      }
+      if (a.type === 'assign') {
+        scan(a.value);
+      }
+      if (a.type === 'log') {
+        scan(a.value);
+      }
+      if (a.type === 'listAppend') {
+        for (const v of Object.values(a.item)) scan(v);
+      }
+      if (a.type === 'foreach') {
+        scan(a.from);
+        if (a.do) walk(a.do);
+      }
+    }
+  };
+  walk(ir);
+
+  return refs;
 }
 
 function emitVariables(vars: DeclaredVariable[]): string {
