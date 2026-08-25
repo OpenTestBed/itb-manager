@@ -202,32 +202,40 @@ function collectVariables(ir: IRAction[]): DeclaredVariable[] {
     }
   }
 
-  // 4a. Variables created by <assign to="varName{prop}"> — base variable is a map
-  for (const a of ir) {
-    if (a.type === 'assign' && a.to && a.to.includes('{')) {
-      const baseName = a.to.split('{')[0];
-      if (baseName && !seen.has(baseName)) {
-        seen.add(baseName);
-        vars.push({ name: baseName, varType: 'map' });
+  // 4a-c. Variables created by <assign to="...">. Walk recursively into
+  // foreach.do and repeat.do — assigns inside loops also need declaring.
+  // For our `i` counter, declare with an initial value of "0" so the
+  // first counter-bump inside the loop can reference it without "Invalid
+  // variable reference" errors (ITB rejects reads of uninitialised vars).
+  const walkAssigns = (actions: IRAction[]) => {
+    for (const a of actions) {
+      if (a.type === 'assign' && a.to) {
+        if (a.to.includes('{')) {
+          const baseName = a.to.split('{')[0];
+          if (baseName && !seen.has(baseName)) {
+            seen.add(baseName);
+            vars.push({ name: baseName, varType: 'map' });
+          }
+        } else if (a.append && !seen.has(a.to)) {
+          seen.add(a.to);
+          vars.push({ name: a.to, varType: 'list[map]' });
+        } else if (!seen.has(a.to)) {
+          seen.add(a.to);
+          // Loop counter — pre-initialise to 0 in the <var> block.
+          if (a.to === 'i') {
+            vars.push({ name: a.to, varType: 'string', value: '0' });
+          } else {
+            vars.push({ name: a.to, varType: 'string' });
+          }
+        }
+      } else if (a.type === 'foreach' && a.do) {
+        walkAssigns(a.do);
+      } else if (a.type === 'repeat' && a.do) {
+        walkAssigns(a.do);
       }
     }
-  }
-
-  // 4b. Variables created by <assign to="varName" append="true"> — variable is a list
-  for (const a of ir) {
-    if (a.type === 'assign' && a.to && !a.to.includes('{') && a.append && !seen.has(a.to)) {
-      seen.add(a.to);
-      vars.push({ name: a.to, varType: 'list[map]' });
-    }
-  }
-
-  // 4c. Other top-level assigns — plain string variables
-  for (const a of ir) {
-    if (a.type === 'assign' && a.to && !a.to.includes('{') && !a.append && !seen.has(a.to)) {
-      seen.add(a.to);
-      vars.push({ name: a.to, varType: 'string' });
-    }
-  }
+  };
+  walkAssigns(ir);
 
   // 5. Variables created by <interact> requests
   for (const a of ir) {
@@ -307,6 +315,10 @@ function collectReferencedVars(ir: IRAction[]): Set<string> {
         scan(a.from);
         if (a.do) walk(a.do);
       }
+      if (a.type === 'repeat') {
+        scan(a.count);
+        if (a.do) walk(a.do);
+      }
     }
   };
   walk(ir);
@@ -336,26 +348,35 @@ function collectActors(ir: IRAction[]): DeclaredActor[] {
   // If no actors were declared, use defaults
   if (actors.length === 0) {
     actors.push({ id: 'Client', role: 'SUT' });
-    actors.push({ id: 'FHIRServer' });
+    actors.push({ id: 'FHIRServer', role: 'infra' });
   }
   return actors;
 }
 
+// Role mapping: our (SUT|infra) onto the GITB-faithful role attribute.
+// GITB's TDL XSD only allows role="SUT" or role="SIMULATED" at the testcase-level
+// <gitb:actor> reference, and NO role attribute on the testsuite-level actor block.
+function gitbRoleAttr(role?: string): string {
+  if (role === 'SUT') return ' role="SUT"';
+  if (role === 'infra') return ' role="SIMULATED"';
+  return '';
+}
+
 /**
  * Emit actor elements for a test case.
- * In TDL, test case actors are simple references: <actor id="..." role="..."/>
- * The role attribute is only "SUT" or "SIMULATED" (not custom strings).
+ * Test-case actors are simple GITB role references: <gitb:actor id="..." role="SUT|SIMULATED"/>.
  */
 function emitActors(actors: DeclaredActor[]): string {
   return actors.map(a => {
-    // Test case actors are simple references — endpoint config belongs in the test suite
-    const roleAttr = a.role === 'SUT' ? ' role="SUT"' : '';
-    return `<gitb:actor id="${escapeAttr(a.id)}"${roleAttr}/>`;
+    return `<gitb:actor id="${escapeAttr(a.id)}"${gitbRoleAttr(a.role)}/>`;
   }).join('\n');
 }
 
 /**
  * Emit actor elements for a test suite.
+ * Testsuite-level <gitb:actor> blocks are RICH (with <gitb:name>, <gitb:desc>) and
+ * the GITB XSD does NOT allow a role attribute here — the testcase-level reference
+ * carries the role.
  */
 function emitSuiteActors(actors: DeclaredActor[]): string {
   return actors.map(a => {
@@ -368,7 +389,9 @@ function emitSuiteActors(actors: DeclaredActor[]): string {
 }
 
 function emitIR(ir: IRAction[]): string {
-  // Find the SUT actor to use as default 'from' on send steps
+  // Default 'from' on send steps is the FIRST SUT actor declared.
+  // P2P scenarios may declare more than one SUT — that's fine; each step can still
+  // set its own `from` explicitly. We just need a sensible default.
   const sutDecl = ir.find(a => a.type === 'declareActor' && a.role === 'SUT') as { type: 'declareActor'; id: string } | undefined;
   const sutActor = sutDecl?.id || 'Client';
 
@@ -388,6 +411,25 @@ function emitIR(ir: IRAction[]): string {
       out.push(`</send>`);
     } else if (a.type === 'log') {
       out.push(`<log>${escapeXml(a.value)}</log>`);
+    } else if (a.type === 'wait') {
+      // The GITB TDL XSD shipping with this ITB has no <sleep> step, and the
+      // available primitives (process/call/verify/etc.) all need a handler we
+      // can't assume exists in the deployment. Emit a <log> for visibility —
+      // the test runs without an actual delay until a sleep mechanism lands.
+      out.push(`<log>"(wait skipped: TDL XSD has no <sleep> step; would have waited ${escapeXml(a.durationMs)} ms)"</log>`);
+    } else if (a.type === 'repeat') {
+      // GITB TDL XSD doesn't allow <repeat>. Use <while> with a counter.
+      // The init value (0) is attached to the <var> in <variables>; the
+      // counter-bump is emitted by the parser as the last IR action inside
+      // do. Wrap operands in number() so TDL's expression evaluator does
+      // numeric comparison and arithmetic.
+      out.push(`<while>`);
+      out.push(`  <cond>number($i) &lt; number(${escapeXml(a.count)})</cond>`);
+      out.push(`  <do>`);
+      const innerOut = emitIR(a.do);
+      out.push(...innerOut.split('\n').map(l => l ? '    ' + l : l));
+      out.push(`  </do>`);
+      out.push(`</while>`);
     } else if (a.type === 'call') {
       out.push(`<call path="${escapeAttr(a.path)}"${a.output ? ` output="${escapeAttr(a.output)}"` : ''}>`);
       if (a.from) out.push(`  <input name="from">${escapeXml(a.from)}</input>`);
@@ -410,7 +452,20 @@ function emitIR(ir: IRAction[]): string {
       // Skip empty-list initializations — TDL creates lists implicitly on first append
       if (a.value === '[]' || a.value === '') continue;
       const appendAttr = a.append ? ' append="true"' : '';
-      out.push(`<assign to="${escapeAttr(a.to)}"${appendAttr}>${escapeXml(a.value)}</assign>`);
+      // ITB's <assign> body is an expression. If the value looks like a JSON
+      // object/array literal (e.g. from a `set "x" to:` docstring with a JSON
+      // body), wrap it in single quotes so the expression evaluator sees a
+      // string literal — otherwise the leading `{` errors as an unexpected
+      // token. Escape any embedded single quotes.
+      let value = a.value;
+      const trimmed = value.trim();
+      const isJsonLiteral =
+        (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+        (trimmed.startsWith('[') && trimmed.endsWith(']'));
+      if (isJsonLiteral) {
+        value = `'${value.replace(/'/g, "\\'")}'`;
+      }
+      out.push(`<assign to="${escapeAttr(a.to)}"${appendAttr}>${escapeXml(value)}</assign>`);
     } else if (a.type === 'listAppend') {
       // TDL assign values are expressions — use single-quoted string to avoid quote conflicts
       const jsonStr = JSON.stringify(a.item).replace(/'/g, "\\'");
@@ -466,8 +521,10 @@ function quoteIfLiteral(v: string): string {
   if (!v) return v;
   // Already quoted or an expression/variable reference
   if (v.startsWith('"') || v.startsWith("'") || v.startsWith('$')) return v;
-  // Function call expression (concat, contains, etc.) — don't quote
-  if (/^[a-zA-Z_]\w*\s*\(/.test(v)) return v;
+  // Function call expression (concat, contains, string-length, starts-with,
+  // local-name, xs:integer, etc.) — don't quote. XPath function names may
+  // contain hyphens and namespace colons; \w alone misses both.
+  if (/^[a-zA-Z_][\w:-]*\s*\(/.test(v)) return v;
   // Pure number
   if (/^[0-9]+(\.[0-9]+)?$/.test(v)) return v;
   // Pure identifier (actor name, variable name, etc.)
@@ -538,6 +595,13 @@ function collectScriptletCalls(ir: IRAction[]): Map<string, Set<string>> {
       calls.set(a.path, existing);
     }
     if (a.type === 'foreach' && a.do) {
+      for (const [path, inputs] of collectScriptletCalls(a.do)) {
+        const existing = calls.get(path) || new Set<string>();
+        for (const k of inputs) existing.add(k);
+        calls.set(path, existing);
+      }
+    }
+    if (a.type === 'repeat' && a.do) {
       for (const [path, inputs] of collectScriptletCalls(a.do)) {
         const existing = calls.get(path) || new Set<string>();
         for (const k of inputs) existing.add(k);

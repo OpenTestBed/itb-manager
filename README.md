@@ -62,3 +62,34 @@ cp .env.example .env
 | `VITE_ITB_ORGANISATION_API_KEY` | | Organisation API key for test execution |
 | `VITE_ITB_SPECIFICATION_ID` | | Default specification ID |
 | `ITB_MYSQL_CONTAINER` | `itb-gitb-mysql-1` | Docker container name for ITB MySQL |
+| `ITB_MOCK` | unset | Set to `1` to run against an in-memory mock instead of a real ITB |
+| `ITB_MOCK_FIXTURE` | `mock/itb-default.yml` | Override the mock fixture file path |
+
+## Mock mode (no real ITB needed)
+
+For development without docker / a running ITB, set `ITB_MOCK=1`:
+
+```bash
+ITB_MOCK=1 npm run dev
+```
+
+This loads [`mock/itb-default.yml`](mock/itb-default.yml) into an in-memory SQLite (sql.js) and routes both `dbQuery()` and `itbFetch()` through it. The header shows a purple **"Mock mode"** indicator instead of *Connected* / *Disconnected*.
+
+What works in mock:
+
+- Listing domains, specs, actors, communities, organizations, systems
+- Vendor self-registration (`/#/register`) — creating an org + system + conformance writes to the in-memory DB
+- The conformance matrix
+- The Matches page (with sample P2P data — see `p2p-exchange` spec in the fixture)
+- Per-vendor deep-link **Copy** and **Send via email**
+
+What does **not** work:
+
+- **Open in ITB** / **Run in ITB** — the URLs point at `mock-itb.local` which has no server behind it (intentional)
+- IG import deploy (the ZIP isn't actually deployed anywhere)
+
+State persistence:
+
+- Mutations are persisted to `~/.itb-test-manager/mock-runtime.json` so they survive dev-server restarts
+- To reset to the seed fixture: `rm ~/.itb-test-manager/mock-runtime.json`
+- To use a different seed: `ITB_MOCK=1 ITB_MOCK_FIXTURE=path/to/your.yml npm run dev`

@@ -35,11 +35,16 @@
       "Bash(curl -s -X PUT \"http://localhost:10003/api/rest/domain\" -H \"ITB_API_KEY: master-api-key\" -H \"Content-Type: application/json\" -d '{\"shortName\":\"Test\",\"fullName\":\"Test Domain\"}')",
       "Bash(curl -s -X PUT \"http://localhost:10003/api/rest/system\" -H \"ITB_API_KEY: 3F339F32X9147X4380X91DFX17F662070ABA\" -H \"Content-Type: application/json\" -d '{\"shortName\":\"Test SUT\",\"fullName\":\"Test SUT\",\"description\":\"\",\"version\":\"1.0\",\"organisation\":\"7B307B4CXB56DX42ABX839FXBEEDE32E8A0F\"}')",
       "Bash(grep -l \"ask user\\\\|inform the user\\\\|lookup.*registry\\\\|resource type should\\\\|FHIRValidator\" public/lang/*.yml public/components/*/en*.yml public/components/*/*.yml)",
-      "Bash(grep -rn \"ask user\\\\|inform.*user\\\\|lookup\\\\|resource.type\\\\|available.at\" /c/work/HOSp/itb-test-manager/dist/components/*/steps.yml)"
+      "Bash(grep -rn \"ask user\\\\|inform.*user\\\\|lookup\\\\|resource.type\\\\|available.at\" /c/work/HOSp/itb-test-manager/dist/components/*/steps.yml)",
+      "Bash(cp e:/work/test-workbench/src/parser/xmlGenerator.ts e:/work/itb-test-manager/src/parser/xmlGenerator.ts && diff -q e:/work/test-workbench/src/parser/xmlGenerator.ts e:/work/itb-test-manager/src/parser/xmlGenerator.ts && echo \"SYNC OK\")",
+      "Bash(grep -nE '\\\\bi\\\\b|number\\\\\\(\\\\$i\\\\\\)' e:/work/test-workbench/src/parser/xmlGenerator.ts e:/work/test-workbench/src/parser/gherkinParser.ts)",
+      "Bash(grep -anE ''\\\\''i'\\\\''|number\\\\\\(\\\\$i\\\\\\)|to: '\\\\''i'\\\\''' e:/work/test-workbench/src/parser/gherkinParser.ts e:/work/test-workbench/src/parser/xmlGenerator.ts)",
+      "Read(//e/work/fhirdispenser/src/**)"
     ],
     "additionalDirectories": [
       "c:\\work\\HOSp\\test-workbench\\src",
-      "c:\\work\\HOSp\\itb-starter"
+      "c:\\work\\HOSp\\itb-starter",
+      "e:\\work\\test-workbench\\src\\parser"
     ]
   }
 }

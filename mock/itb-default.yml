@@ -1,0 +1,259 @@
+# Mock ITB fixture — represents a typical setup for offline development.
+# Loaded into an in-memory SQLite DB at startup when ITB_MOCK=1 is set.
+#
+# IDs (numeric `id` fields) are stable; keep them small and unique within a
+# table. The `api_key` strings are arbitrary but should be unique per record.
+#
+# To reset to this seed, delete `~/.itb-test-manager/mock-runtime.json`.
+# Mutations (org/system/conformance creation) write back to that runtime file.
+
+itb_url: http://mock-itb.local:10003
+api_keys:
+  master: MOCK_MASTER_KEY
+  community: MOCK_COMMUNITY_KEY
+
+communities:
+  - id: 1
+    sname: testdomain
+    fname: Test community
+    api_key: MOCK_COMMUNITY_KEY
+    description: Mock community for development.
+    domain: 1
+  - id: 2
+    sname: admin
+    fname: Admin community
+    api_key: MOCK_ADMIN_COMMUNITY_KEY
+    description: System / admin community.
+
+domains:
+  - id: 1
+    sname: testdomain
+    fname: FHIR Testing
+    api_key: MOCK_DOMAIN_KEY
+    description: Default domain shipped with the mock.
+
+specifications:
+  - id: 1
+    domain: 1
+    sname: hl7.fhir.uv.testing
+    fname: HL7 FHIR uv testing
+    api_key: MOCK_SPEC_FHIRTEST
+    description: Single-SUT FHIR-validator smoke test (no peer-to-peer).
+    is_hidden: 0
+  - id: 2
+    domain: 1
+    sname: server-smoke
+    fname: FHIR server smoke
+    api_key: MOCK_SPEC_SERVER
+    description: Tests a FHIR server's CapabilityStatement and a Patient round-trip.
+    is_hidden: 0
+  - id: 3
+    domain: 1
+    sname: p2p-exchange
+    fname: P2P document exchange
+    api_key: MOCK_SPEC_P2P
+    description: Peer-to-peer spec with two SUT actors (Sender + Receiver).
+    is_hidden: 0
+
+actors:
+  # Spec 1 — single SUT (Client) + infra (FHIRValidator)
+  - id: 1
+    actorId: Client
+    name: Client
+    api_key: MOCK_ACTOR_CLIENT_S1
+    is_default: 1
+    is_hidden: 0
+    spec: 1
+  - id: 2
+    actorId: FHIRValidator
+    name: FHIR Validator
+    api_key: MOCK_ACTOR_VALIDATOR_S1
+    is_default: 0
+    is_hidden: 0
+    spec: 1
+  # Spec 2 — single SUT (FHIRServer) + infra
+  - id: 3
+    actorId: FHIRServer
+    name: FHIR Server
+    api_key: MOCK_ACTOR_FHIRSERVER_S2
+    is_default: 1
+    is_hidden: 0
+    spec: 2
+  - id: 4
+    actorId: Client
+    name: Test Client
+    api_key: MOCK_ACTOR_CLIENT_S2
+    is_default: 0
+    is_hidden: 0
+    spec: 2
+  - id: 5
+    actorId: FHIRValidator
+    name: FHIR Validator
+    api_key: MOCK_ACTOR_VALIDATOR_S2
+    is_default: 0
+    is_hidden: 0
+    spec: 2
+  # Spec 3 — P2P (Sender + Receiver are both SUT)
+  - id: 6
+    actorId: Sender
+    name: Document sender
+    api_key: MOCK_ACTOR_SENDER
+    is_default: 1
+    is_hidden: 0
+    spec: 3
+  - id: 7
+    actorId: Receiver
+    name: Document receiver
+    api_key: MOCK_ACTOR_RECEIVER
+    is_default: 0
+    is_hidden: 0
+    spec: 3
+
+testsuites:
+  - id: 1
+    sname: fhir-validator-smoke
+    fname: FHIR validator smoke suite
+    spec: 1
+  - id: 2
+    sname: fhir-server-smoke
+    fname: FHIR server smoke suite
+    spec: 2
+  - id: 3
+    sname: p2p-suite
+    fname: P2P document exchange suite
+    spec: 3
+
+# Per-testcase actor assignments — ITB's TestCaseHasActors.sut column
+# governs whether each actor is the SUT for that testcase.
+testcases:
+  # Spec 1
+  - id: 1
+    sname: itb-smoke-001
+    fname: Validator smoke 1
+    spec: 1
+    suite: 1
+    actors_sut: [Client]
+    actors_simulated: [FHIRValidator]
+  # Spec 2
+  - id: 2
+    sname: server-smoke-001
+    fname: Server smoke 1
+    spec: 2
+    suite: 2
+    actors_sut: [FHIRServer]
+    actors_simulated: [Client, FHIRValidator]
+  # Spec 3 — P2P, two testcases (one per role)
+  - id: 3
+    sname: p2p-send-001
+    fname: Sender perspective
+    spec: 3
+    suite: 3
+    actors_sut: [Sender]
+    actors_simulated: [Receiver]
+  - id: 4
+    sname: p2p-recv-001
+    fname: Receiver perspective
+    spec: 3
+    suite: 3
+    actors_sut: [Receiver]
+    actors_simulated: [Sender]
+
+# Pre-existing organisations/systems so the manager can see registrations
+# right away. Vendor-registration flow can also create new ones at runtime.
+organisations:
+  # Admin org under the admin community (ITB convention)
+  - id: 1
+    sname: Admin organisation
+    fname: Admin organisation
+    api_key: MOCK_ORG_ADMIN
+    community: 2
+    admin_organization: 1
+  # Real vendors under the test community
+  - id: 2
+    sname: acme
+    fname: ACME Health Systems
+    api_key: MOCK_ORG_ACME
+    community: 1
+    admin_organization: 0
+  - id: 3
+    sname: beta
+    fname: Beta Software Inc.
+    api_key: MOCK_ORG_BETA
+    community: 1
+    admin_organization: 0
+
+systems:
+  - id: 1
+    sname: acme-server
+    fname: ACME EHR Server v3
+    api_key: MOCK_SYS_ACME
+    owner: 2
+    version: '1.0'
+  - id: 2
+    sname: beta-client
+    fname: Beta FHIR Client
+    api_key: MOCK_SYS_BETA_CLIENT
+    owner: 3
+    version: '1.0'
+  - id: 3
+    sname: beta-server
+    fname: Beta FHIR Server
+    api_key: MOCK_SYS_BETA_SERVER
+    owner: 3
+    version: '1.0'
+
+# (system_api_key, actor_api_key) — pre-registered conformance statements.
+conformance:
+  # ACME plays Client in the validator-smoke spec, FHIRServer in server-smoke,
+  # Sender in p2p
+  - system: MOCK_SYS_ACME
+    actor: MOCK_ACTOR_CLIENT_S1
+  - system: MOCK_SYS_ACME
+    actor: MOCK_ACTOR_FHIRSERVER_S2
+  - system: MOCK_SYS_ACME
+    actor: MOCK_ACTOR_SENDER
+  # Beta plays Client + Receiver — completes the P2P pair
+  - system: MOCK_SYS_BETA_CLIENT
+    actor: MOCK_ACTOR_CLIENT_S1
+  - system: MOCK_SYS_BETA_SERVER
+    actor: MOCK_ACTOR_FHIRSERVER_S2
+  - system: MOCK_SYS_BETA_SERVER
+    actor: MOCK_ACTOR_RECEIVER
+
+# A handful of test results so execution-status pills have something to show.
+test_results:
+  # ACME Client on validator-smoke — one passed, one failed
+  - test_session_id: SESS-1
+    sut: MOCK_SYS_ACME
+    actor: MOCK_ACTOR_CLIENT_S1
+    spec: 1
+    suite: 1
+    testcase: 1
+    result: SUCCESS
+    end_time: '2026-05-04 12:00:00'
+  - test_session_id: SESS-2
+    sut: MOCK_SYS_ACME
+    actor: MOCK_ACTOR_CLIENT_S1
+    spec: 1
+    suite: 1
+    testcase: 1
+    result: FAILURE
+    end_time: '2026-05-04 13:00:00'
+  # ACME Sender on p2p — passed
+  - test_session_id: SESS-3
+    sut: MOCK_SYS_ACME
+    actor: MOCK_ACTOR_SENDER
+    spec: 3
+    suite: 3
+    testcase: 3
+    result: SUCCESS
+    end_time: '2026-05-05 09:00:00'
+  # Beta Receiver on p2p — still running (no end_time)
+  - test_session_id: SESS-4
+    sut: MOCK_SYS_BETA_SERVER
+    actor: MOCK_ACTOR_RECEIVER
+    spec: 3
+    suite: 3
+    testcase: 4
+    result: RUNNING
+    end_time: null

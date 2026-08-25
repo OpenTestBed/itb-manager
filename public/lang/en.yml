@@ -14,8 +14,19 @@ steps:
   # ==================================================================
   # 1. ACTORS
   # ==================================================================
-  # <Actor> is the system under test [at <endpoint>] [as defined by <canonical>]
-  # <Actor> is available [as "<name>"] [at <endpoint>] [as defined by <canonical>]
+  # Roles (matches ITB/GITB vocabulary — SUT is a reserved word):
+  #   SUT     — system under test; the matrix measures conformance for this actor.
+  #             A test plan may declare multiple SUT actors (peer-to-peer testing).
+  #   infra   — required to run the test but not measured (mocks, simulators, proxies).
+  #
+  # Maps to GITB TDL role attribute: SUT → role="SUT", infra → role="SIMULATED".
+  # A 'calibration' role is planned but deferred until ITB can carry the
+  # distinction natively (the GITB XSD rejects unknown attributes).
+  #
+  # Phrases:
+  #   <Actor> is the system under test [at <endpoint>] [as defined by <canonical>]   -> SUT
+  #   <Actor> is available [as "<name>"] [at <endpoint>] [as defined by <canonical>] -> infra (default)
+  #   <Actor> is infrastructure [at <endpoint>] [as defined by <canonical>]          -> infra (explicit)
 
   - match: '^([A-Za-z][A-Za-z0-9_]*) is the system under test (?:on|at) "?(https?://[^"\s]+)"? as defined by "?(https?://[^"\s]+)"?$'
     actions:
@@ -37,25 +48,43 @@ steps:
 
   - match: '^([A-Za-z][A-Za-z0-9_]*) is available (?:on|at) "?(https?://[^"\s]+)"? as defined by "?(https?://[^"\s]+)"?$'
     actions:
-      - declareActor: { id: '$1', endpoint: '$2', canonical: '$3' }
+      - declareActor: { id: '$1', role: 'infra', endpoint: '$2', canonical: '$3' }
       - assign: { to: '$1Base', value: '"$2"' }
 
   - match: '^([A-Za-z][A-Za-z0-9_]*) is available (?:on|at) "?(https?://[^"\s]+)"?$'
     actions:
-      - declareActor: { id: '$1', endpoint: '$2' }
+      - declareActor: { id: '$1', role: 'infra', endpoint: '$2' }
       - assign: { to: '$1Base', value: '"$2"' }
 
   - match: '^([A-Za-z][A-Za-z0-9_]*) is available as defined by "?(https?://[^"\s]+)"?$'
     actions:
-      - declareActor: { id: '$1', canonical: '$2' }
+      - declareActor: { id: '$1', role: 'infra', canonical: '$2' }
 
   - match: '^([A-Za-z][A-Za-z0-9_]*) is available as "([^"]+)"$'
     actions:
-      - declareActor: { id: '$1', name: '$2' }
+      - declareActor: { id: '$1', role: 'infra', name: '$2' }
 
   - match: '^([A-Za-z][A-Za-z0-9_]*) is available$'
     actions:
-      - declareActor: { id: '$1' }
+      - declareActor: { id: '$1', role: 'infra' }
+
+  - match: '^([A-Za-z][A-Za-z0-9_]*) is infrastructure (?:on|at) "?(https?://[^"\s]+)"? as defined by "?(https?://[^"\s]+)"?$'
+    actions:
+      - declareActor: { id: '$1', role: 'infra', endpoint: '$2', canonical: '$3' }
+      - assign: { to: '$1Base', value: '"$2"' }
+
+  - match: '^([A-Za-z][A-Za-z0-9_]*) is infrastructure (?:on|at) "?(https?://[^"\s]+)"?$'
+    actions:
+      - declareActor: { id: '$1', role: 'infra', endpoint: '$2' }
+      - assign: { to: '$1Base', value: '"$2"' }
+
+  - match: '^([A-Za-z][A-Za-z0-9_]*) is infrastructure as defined by "?(https?://[^"\s]+)"?$'
+    actions:
+      - declareActor: { id: '$1', role: 'infra', canonical: '$2' }
+
+  - match: '^([A-Za-z][A-Za-z0-9_]*) is infrastructure$'
+    actions:
+      - declareActor: { id: '$1', role: 'infra' }
 
   # ==================================================================
   # 2. HTTP REQUESTS
@@ -87,6 +116,36 @@ steps:
             method: '"POST"'
             headers: '$jsonHeaders'
             body: '$docString'
+
+  # Repeated POST: <Actor> posts "<bodyVar>" to <Actor> at "<path>" <N> times, manually paced
+  # bodyVar is a previously-set variable holding a JSON body. N is a literal or $var.
+  # Between dispense requests, the operator gets a "Click Continue when ready"
+  # prompt — pace it by hand. (TDL has no sleep step in this ITB; manual
+  # pacing keeps the test deterministic for asynchronous SUTs like Spenser.)
+  - match: '^([A-Za-z][A-Za-z0-9_]*) posts "([A-Za-z_][A-Za-z0-9_]*)" to ([A-Za-z][A-Za-z0-9_]*) at "([^"]+)" ([0-9]+|\$[A-Za-z_][A-Za-z0-9_]*) times, paced manually$'
+    actions:
+      - assign: { to: 'jsonHeaders{Content-Type}', value: '"application/json"' }
+      - assign: { to: 'jsonHeaders{Accept}', value: '"application/json"' }
+      - repeat:
+          count: '$5'
+          do:
+            - send:
+                id: 'lastRequest'
+                desc: 'POST (loop)'
+                handler: 'HttpMessagingV2'
+                from: '$1'
+                to: '$3'
+                inputs:
+                  uri: 'concat($$3Base, "$4")'
+                  method: '"POST"'
+                  headers: '$jsonHeaders'
+                  body: '$$2'
+            - call:
+                path: scriptlets/instructUser.xml
+                inputs:
+                  step: '"inform"'
+                  actor: '"$1"'
+                  message: '"Dispense in progress — click Continue when the device finishes and is ready for the next request."'
 
   # PUT with body
   - match: '^([A-Za-z][A-Za-z0-9_]*) puts to ([A-Za-z][A-Za-z0-9_]*) at "([^"]+)" with:$'
@@ -137,7 +196,29 @@ steps:
             method: '"DELETE"'
             headers: '$jsonHeaders'
 
-  # GET and store result
+  # GET and store result — relative path via the receiving actor's base URL.
+  # Mirrors the POST/PUT/PATCH/DELETE pattern. Use this when the URL is
+  # relative to an actor's declared endpoint (the actor must have been
+  # declared with `at "<endpoint>"`).
+  - match: '^([A-Za-z][A-Za-z0-9_]*) gets from ([A-Za-z][A-Za-z0-9_]*) at "([^"]+)" as "([A-Za-z_][A-Za-z0-9_]*)"$'
+    actions:
+      - assign: { to: 'jsonHeaders{Accept}', value: '"application/json"' }
+      - send:
+          id: 'lastRequest'
+          desc: 'GET'
+          handler: 'HttpMessagingV2'
+          from: '$1'
+          to: '$2'
+          inputs:
+            uri: 'concat($$2Base, "$3")'
+            method: '"GET"'
+            headers: '$jsonHeaders'
+      - assign: { to: '$4', value: '$lastRequest{response}{body}' }
+
+  # GET and store result — absolute URL form. CAVEAT: TDL string literals do
+  # NOT interpolate $variables, so writing `gets "$ActorBase/path"` won't work
+  # at runtime — use the `gets from <Actor> at "<path>"` form above instead.
+  # This form is for fully-resolved URLs that are literal at compile time.
   - match: '^([A-Za-z][A-Za-z0-9_]*) gets "([^"]+)" as "([A-Za-z_][A-Za-z0-9_]*)"$'
     actions:
       - assign: { to: 'jsonHeaders{Accept}', value: '"application/json"' }
@@ -242,12 +323,21 @@ steps:
           inputs: { expression: '($$1 = "") or contains($$2, "$3")' }
 
   # ==================================================================
+  # 5b. TIMING
+  # ==================================================================
+  # wait <N> seconds   — N is a literal int or a $variable
+  - match: '^wait ([0-9]+|\$[A-Za-z_][A-Za-z0-9_]*) seconds$'
+    actions:
+      - wait: { durationMs: '$1 * 1000' }
+
+  # ==================================================================
   # 6. ASSERTIONS
   # ==================================================================
   # "<variable>" should be "<value>"
   # "<variable>" should not be "<value>"
   # "<variable>" should contain "<value>"
   # "<variable>" should not be empty
+  # "<lhs>" should equal "<rhs>" minus "<n>"   — numeric: assert lhs == rhs - n
   # Reserved names: "response status", "response", "validation errors", etc.
 
   - match: '^"([^"]+)" should be "([^"]+)"$'
@@ -256,6 +346,15 @@ steps:
           handler: 'StringValidator'
           desc: 'Equals'
           inputs: { actualstring: '$$1', expectedstring: '"$2"' }
+
+  # Numeric arithmetic: assert that lhs equals (rhs - n).
+  # All three operands are coerced to number(); n may be a literal or "$var".
+  - match: '^"([^"]+)" should equal "([^"]+)" minus "([^"]+)"$'
+    actions:
+      - verify:
+          handler: 'ExpressionValidator'
+          desc: 'Numeric equals minus'
+          inputs: { expression: 'number($$1) = number($$2) - number($3)' }
 
   - match: '^"([^"]+)" should not be "([^"]+)"$'
     actions:
@@ -281,9 +380,9 @@ steps:
   - match: '^"([^"]+)" should not be empty$'
     actions:
       - verify:
-          handler: 'StringValidator'
+          handler: 'ExpressionValidator'
           desc: 'Not empty'
-          inputs: { actualstring: '$$1', expectedstring: '"not-null"' }
+          inputs: { expression: 'string-length($$1) > 0' }
 
   # "<var>" should be a valid <Type> resource
   # Validates the resource against the base FHIR profile for the given type
@@ -359,7 +458,7 @@ steps:
           desc: '$3'
           inputTitle: '$3'
           requests:
-            - { desc: '$3', name: '$2', inputType: 'UPLOAD', required: true, variable: '$$2' }
+            - { desc: '$3', name: '$2', inputType: 'TEXT', required: true, variable: '$$2' }
 
   - match: '^([A-Za-z][A-Za-z0-9_]*) is asked for "([A-Za-z_][A-Za-z0-9_]*)"$'
     actions:
@@ -369,7 +468,7 @@ steps:
           desc: 'Provide input'
           inputTitle: 'Provide input'
           requests:
-            - { desc: 'Provide input:', name: '$2', inputType: 'UPLOAD', required: true, variable: '$$2' }
+            - { desc: 'Provide input:', name: '$2', inputType: 'TEXT', required: true, variable: '$$2' }
 
   # ==================================================================
   # 8. LOGGING

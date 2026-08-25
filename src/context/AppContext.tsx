@@ -4,6 +4,8 @@ import { ITBConfig, loadITBConfig, saveITBConfig } from '../services/itbClient';
 export interface AppState {
   connected: boolean;
   hasMasterKey: boolean;
+  /** True when ITB_MOCK=1 is active — header shows a "Mock mode" badge. */
+  mock_mode?: boolean;
   domainKey: string;
   domainName: string;
   communityKey: string;
@@ -11,8 +13,20 @@ export interface AppState {
   organisationApiKey: string;
   selectedCommunity: { apiKey: string; shortName: string; fullName: string } | null;
   selectedOrganisation: { apiKey: string; shortName: string; fullName: string } | null;
-  importedIGs: Record<string, { version: string; url: string; spec_keys: string[] }>;
+  importedIGs: Record<string, {
+    version: string;
+    url: string;
+    spec_keys: string[];
+    /**
+     * Per-TestPlan → Specification mapping for re-import detection.
+     * Keyed by `TestPlan.identifier[system="http://smart-architecture/placeholder/actorids"].value`
+     * when present, else by `TestPlan.id` (less stable, prefer the namespaced identifier).
+     */
+    testPlans?: Record<string, { specKey: string; name?: string; lastDeployedAt?: string }>;
+  }>;
 }
+
+export type Persona = 'spec' | 'vendor';
 
 interface AppContextType {
   isDark: boolean;
@@ -31,6 +45,10 @@ interface AppContextType {
   selectedSpecKey: string;
   selectedSpecName: string;
   selectSpec: (key: string, name: string) => void;
+  // Cosmetic UI lens — controls which tree sections the sidebar shows.
+  // Doesn't gate routing or data; pages remain reachable via direct hash links.
+  persona: Persona;
+  setPersona: (p: Persona) => void;
 }
 
 const AppContext = createContext<AppContextType>(null!);
@@ -66,6 +84,16 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     localStorage.setItem('selectedSpecName', name);
   }, []);
 
+  // Persona — purely cosmetic; default 'spec' (typical first-time user is onboarding specs).
+  const [persona, setPersonaState] = useState<Persona>(() => {
+    const v = localStorage.getItem('itm:persona');
+    return v === 'vendor' ? 'vendor' : 'spec';
+  });
+  const setPersona = useCallback((p: Persona) => {
+    setPersonaState(p);
+    localStorage.setItem('itm:persona', p);
+  }, []);
+
   // Hash-based navigation
   const navigate = useCallback((p: string) => {
     window.location.hash = `/${p}`;
@@ -96,6 +124,7 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         setAppState({
           connected: d.connected,
           hasMasterKey: d.has_master_key || false,
+          mock_mode: !!d.mock_mode,
           domainKey: d.domain_key || '',
           domainName: d.domain_name || '',
           communityKey: d.community_key || '',
@@ -125,6 +154,7 @@ export const AppContextProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       itbConfig, setITBConfig, saveConfig, itbSettingsOpen, setITBSettingsOpen,
       appState, refreshState, path, navigate,
       selectedSpecKey, selectedSpecName, selectSpec,
+      persona, setPersona,
     }}>
       {children}
     </AppContext.Provider>

@@ -47,6 +47,8 @@ export type IRAction =
   | { type: 'log', value: string }
   | { type: 'listAppend', list: string, item: Record<string,string> }
   | { type: 'foreach', from: string, do: IRAction[] }
+  | { type: 'repeat', count: string, do: IRAction[] }
+  | { type: 'wait', durationMs: string }
   | { type: 'declareActor', id: string, name?: string, role?: string, endpoint?: string, canonical?: string }
   | { type: 'declareVariable', name: string, varType: string, value?: string }
   | { type: 'interact', id?: string, desc?: string, inputTitle?: string, requests: { desc: string, name?: string, inputType?: string, required?: boolean, variable: string }[] }
@@ -509,6 +511,43 @@ function materialize(actions: CatalogAction[], ctx: any): IRAction[] {
       out.push({ type: 'declareActor', id: subst(clone.declareActor.id), name: subst(clone.declareActor.name ?? ''), role: subst(clone.declareActor.role ?? ''), endpoint: subst(clone.declareActor.endpoint ?? ''), canonical: subst(clone.declareActor.canonical ?? '') });
       return;
     }
+    if (clone.wait) {
+      out.push({ type: 'wait', durationMs: subst(clone.wait.durationMs) });
+      return;
+    }
+    if (clone.repeat) {
+      // Build the loop body's IR directly. Only a small set of action types
+      // make sense inside a `repeat` (send / call / wait / assign / log) —
+      // extend if we need richer loop bodies later.
+      const sub: IRAction[] = [];
+      for (const child of clone.repeat.do) {
+        const c2 = JSON.parse(JSON.stringify(child));
+        if (c2.send) {
+          for (const k in c2.send.inputs) c2.send.inputs[k] = subst(c2.send.inputs[k]);
+          sub.push({ type: 'send', id: subst(c2.send.id ?? ''), desc: subst(c2.send.desc ?? ''), handler: c2.send.handler, from: subst(c2.send.from ?? ''), to: subst(c2.send.to ?? ''), inputs: c2.send.inputs });
+        } else if (c2.call) {
+          if (c2.call.inputs) for (const k in c2.call.inputs) c2.call.inputs[k] = subst(c2.call.inputs[k]);
+          sub.push({ type: 'call', path: c2.call.path, output: c2.call.output ? subst(c2.call.output) : undefined, from: subst(c2.call.from ?? ''), to: subst(c2.call.to ?? ''), inputs: c2.call.inputs });
+        } else if (c2.wait) {
+          sub.push({ type: 'wait', durationMs: subst(c2.wait.durationMs) });
+        } else if (c2.assign) {
+          sub.push({ type: 'assign', to: subst(c2.assign.to), value: subst(c2.assign.value), append: !!c2.assign.append });
+        } else if (c2.log) {
+          sub.push({ type: 'log', value: subst(typeof c2.log === 'string' ? c2.log : c2.log.value) });
+        }
+      }
+      // Loop counter handling — three layers, all redundant on purpose so
+      // that whichever mechanism this ITB recognises will initialise the
+      // variable before the <while>'s cond reads it:
+      //   (a) <var> declaration with <value>0</value>          (collectVariables)
+      //   (b) top-level <assign to="i">0</assign>        (this push, before repeat)
+      //   (c) bump-assign inside the loop body                 (this push, last in `sub`)
+      // If (a) is honoured, (b) is harmless; if (a) isn't, (b) saves us.
+      out.push({ type: 'assign', to: 'i', value: '0' });
+      sub.push({ type: 'assign', to: 'i', value: 'number($i) + 1' });
+      out.push({ type: 'repeat', count: subst(clone.repeat.count), do: sub });
+      return;
+    }
     if (clone.send) {
       for (const k in clone.send.inputs) clone.send.inputs[k] = subst(clone.send.inputs[k]);
       out.push({ type: 'send', id: subst(clone.send.id ?? ''), desc: subst(clone.send.desc ?? ''), handler: clone.send.handler, from: subst(clone.send.from ?? ''), to: subst(clone.send.to ?? ''), inputs: clone.send.inputs });
@@ -525,7 +564,7 @@ function materialize(actions: CatalogAction[], ctx: any): IRAction[] {
     }
     if (clone.verify) {
       for (const k in clone.verify.inputs) clone.verify.inputs[k] = subst(clone.verify.inputs[k]);
-      out.push({ type: 'verify', handler: clone.verify.handler, desc: clone.verify.desc, inputs: clone.verify.inputs });
+      out.push({ type: 'verify', handler: clone.verify.handler, desc: subst(clone.verify.desc ?? ''), inputs: clone.verify.inputs });
       return;
     }
     if (clone.process) {

@@ -34,17 +34,35 @@ Digit       = "0".."9" ;
 ## 1. Actors
 
 ```ebnf
-actor-sut       = Actor , "is the system under test"
-                  , [ ( "on" | "at" ) , URL ]
-                  , [ "as defined by" , URL ] ;
+actor-sut         = Actor , "is the system under test"
+                    , [ ( "on" | "at" ) , URL ]
+                    , [ "as defined by" , URL ] ;
 
-actor-available = Actor , "is available"
-                  , [ "as" , Value ]
-                  , [ ( "on" | "at" ) , URL ]
-                  , [ "as defined by" , URL ] ;
+actor-available   = Actor , "is available"
+                    , [ "as" , Value ]
+                    , [ ( "on" | "at" ) , URL ]
+                    , [ "as defined by" , URL ] ;
+
+actor-infra       = Actor , "is infrastructure"
+                    , [ ( "on" | "at" ) , URL ]
+                    , [ "as defined by" , URL ] ;
 ```
 
 **Constraints:** `as "<name>"` is mutually exclusive with endpoint/canonical options.
+
+### Actor roles
+
+Each actor declaration carries a *role* that flows into the compiled TDL and downstream tools:
+
+| Phrase | Role |
+|---|---|
+| `is the system under test` | `SUT` (matches GITB's reserved word) |
+| `is available` | `infra` (default for non-SUT support actors) |
+| `is infrastructure` | `infra` (explicit alias) |
+
+A scenario MAY declare multiple `SUT` actors (peer-to-peer testing — e.g. a sender and a receiver where both are real systems being measured).
+
+In the emitted TDL, `SUT` becomes GITB's `role="SUT"` on the testcase-level actor reference; `infra` becomes `role="SIMULATED"`. The testsuite-level `<gitb:actor>` block does not carry a role attribute (XSD constraint). A `calibration` role is planned but deferred until ITB can carry the distinction natively.
 
 ## 2. HTTP Requests
 

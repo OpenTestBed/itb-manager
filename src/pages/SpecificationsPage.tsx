@@ -1,11 +1,15 @@
 import React, { useEffect, useState } from 'react';
-import { FileCheck, TestTube2, Users, Globe, ChevronRight, PackagePlus, Loader2 } from 'lucide-react';
+import { FileCheck, TestTube2, Users, Globe, ChevronRight, PackagePlus, Loader2, ExternalLink, PackageCheck, RefreshCw, X, CheckCircle } from 'lucide-react';
 import { useAppContext } from '../context/AppContext';
+import { RecentRunsTable } from '../components/RecentRunsTable';
+import { Markdown } from '../components/Markdown';
 
 export function SpecificationsPage() {
   const { path, navigate, appState, selectedSpecKey, selectSpec } = useAppContext();
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [justCreated, setJustCreated] = useState(false);
+  const [itbSpecUrl, setITBSpecUrl] = useState<string | null>(null);
 
   // Parse path to determine view
   // #/specifications → list domains (or auto-drill)
@@ -19,10 +23,39 @@ export function SpecificationsPage() {
     setLoading(true);
     setData(null);
 
+    // One-shot "just created" handoff from the Import IG flow.
+    // ImportIGPage writes sessionStorage['itm:just-created'] = <specKey> on success.
+    if (viewLevel === 'spec' && viewKey) {
+      const flagged = sessionStorage.getItem('itm:just-created');
+      if (flagged === viewKey) {
+        setJustCreated(true);
+        sessionStorage.removeItem('itm:just-created');
+      } else {
+        setJustCreated(false);
+      }
+    } else {
+      setJustCreated(false);
+    }
+
+    // Scroll-into-runs handoff (set by matrix cell click). Read after data loads
+    // so the target element is in the DOM.
+    if (viewLevel === 'spec' && sessionStorage.getItem('itm:scroll-to') === 'runs') {
+      sessionStorage.removeItem('itm:scroll-to');
+      setTimeout(() => {
+        document.getElementById('runs')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 250);  // give the runs table time to fetch and render
+    }
+
     if (viewLevel === 'domain' && viewKey) {
       fetch(`/api/domains/${viewKey}/specifications`).then(r => r.ok ? r.json() : []).then(setData).catch(() => setData([])).finally(() => setLoading(false));
     } else if (viewLevel === 'spec' && viewKey) {
       fetch(`/api/specifications/${viewKey}/detail`).then(r => r.ok ? r.json() : null).then(setData).catch(() => setData(null)).finally(() => setLoading(false));
+      // Resolve the ITB admin URL for this spec (returns { url: null } if unresolvable).
+      setITBSpecUrl(null);
+      fetch(`/api/itb-spec-url?spec=${encodeURIComponent(viewKey)}`)
+        .then(r => r.ok ? r.json() : { url: null })
+        .then(d => setITBSpecUrl(d?.url || null))
+        .catch(() => setITBSpecUrl(null));
     } else {
       // specifications or unknown — fetch domains
       fetch('/api/domains').then(r => r.ok ? r.json() : []).then(d => {
@@ -120,17 +153,91 @@ export function SpecificationsPage() {
 
       ) : viewLevel === 'spec' ? (
         /* ── Spec detail ── */
-        <div>
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h1 className="text-xl font-bold text-gray-900 dark:text-white">{data?.fullName || data?.shortName || 'Specification'}</h1>
-              {data?.description && <p className="text-sm text-gray-500 dark:text-slate-400 mt-0.5">{data.description}</p>}
+        (() => {
+          // Reverse-lookup IG provenance for this spec.
+          const igEntry = Object.entries(appState.importedIGs || {}).find(
+            ([, v]) => Array.isArray(v.spec_keys) && v.spec_keys.includes(viewKey)
+          );
+          const igName = igEntry?.[0];
+          const igInfo = igEntry?.[1];
+
+          // Note: removed the page-level "Open in ITB" button — it always
+          // resolved to /app home because we don't yet know ITB's admin URL
+          // pattern for a specific specification. Per-Run "Open" links inside
+          // the Recent runs card go directly to the right session.
+
+          const startReimport = () => {
+            // Hand off context to ImportIGPage so it can preselect URL + target spec.
+            if (igInfo?.url) {
+              sessionStorage.setItem('itm:reimport', JSON.stringify({
+                url: igInfo.url,
+                specKey: viewKey,
+                specName: data?.fullName || data?.shortName || '',
+              }));
+            }
+            selectSpec(viewKey, data?.fullName || data?.shortName || '');
+            navigate('import-ig');
+          };
+
+          return <div>
+          {justCreated && (
+            <div className="mb-4 flex items-start gap-3 p-3 rounded-lg bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800">
+              <CheckCircle size={18} className="text-green-600 dark:text-green-400 mt-0.5 flex-shrink-0" />
+              <div className="flex-1 text-sm">
+                <div className="font-semibold text-green-800 dark:text-green-300">Specification ready</div>
+                <div className="text-green-700 dark:text-green-400 mt-0.5">Imported and deployed. Use the actions below to run a test or update from the IG.</div>
+              </div>
+              <button onClick={() => setJustCreated(false)} className="text-green-600/70 hover:text-green-800 dark:text-green-500 dark:hover:text-green-300" aria-label="Dismiss">
+                <X size={16} />
+              </button>
             </div>
-            <button onClick={() => { selectSpec(viewKey, data?.fullName || data?.shortName || ''); navigate('import-ig'); }}
-              className="flex items-center gap-2 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700">
-              <PackagePlus size={14} /> Import tests
-            </button>
+          )}
+
+          <div className="flex items-start justify-between mb-4 gap-4">
+            <div className="min-w-0">
+              <h1 className="text-xl font-bold text-gray-900 dark:text-white">{data?.fullName || data?.shortName || 'Specification'}</h1>
+              {data?.description && <Markdown className="text-sm text-gray-500 dark:text-slate-400 mt-0.5">{data.description}</Markdown>}
+            </div>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              {itbSpecUrl && (
+                <a href={itbSpecUrl} target="_blank" rel="noopener"
+                  className="flex items-center gap-2 px-3 py-1.5 border border-gray-300 dark:border-slate-600 text-gray-700 dark:text-slate-200 rounded-lg text-sm hover:bg-gray-50 dark:hover:bg-slate-800"
+                  title="Open this specification in ITB admin">
+                  <ExternalLink size={14} /> Open in ITB
+                </a>
+              )}
+              <button onClick={() => { selectSpec(viewKey, data?.fullName || data?.shortName || ''); navigate('import-ig'); }}
+                className="flex items-center gap-2 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700">
+                <PackagePlus size={14} /> Import tests
+              </button>
+            </div>
           </div>
+
+          {/* IG provenance */}
+          {igEntry && (
+            <div className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 mb-4 overflow-hidden">
+              <div className="px-4 py-2.5 border-b border-gray-200 dark:border-slate-700 flex items-center gap-2 bg-gray-50 dark:bg-slate-800">
+                <PackageCheck size={14} className="text-blue-500" />
+                <span className="font-semibold text-sm text-gray-900 dark:text-white">Imported from Implementation Guide</span>
+              </div>
+              <div className="px-4 py-3 flex items-center justify-between gap-3 flex-wrap">
+                <div className="min-w-0">
+                  <div className="font-medium text-sm text-gray-900 dark:text-white truncate">{igName}</div>
+                  <div className="text-xs text-gray-500 dark:text-slate-400 mt-0.5 flex items-center gap-2 flex-wrap">
+                    <span className="bg-gray-100 dark:bg-slate-800 px-1.5 py-0.5 rounded">v{igInfo?.version || '—'}</span>
+                    {igInfo?.url && <a href={igInfo.url} target="_blank" rel="noopener" className="text-blue-600 hover:underline flex items-center gap-1 truncate max-w-md">
+                      <span className="truncate">{igInfo.url}</span>
+                      <ExternalLink size={10} className="flex-shrink-0" />
+                    </a>}
+                  </div>
+                </div>
+                <button onClick={startReimport}
+                  className="flex items-center gap-1.5 px-3 py-1.5 border border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-400 rounded-lg text-sm hover:bg-blue-50 dark:hover:bg-blue-900/20 flex-shrink-0">
+                  <RefreshCw size={13} /> Re-import / Update
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Test Suites */}
           <div className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 mb-4 overflow-hidden">
@@ -159,7 +266,7 @@ export function SpecificationsPage() {
           </div>
 
           {/* Actors */}
-          <div className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 overflow-hidden">
+          <div className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 overflow-hidden mb-4">
             <div className="px-4 py-2.5 border-b border-gray-200 dark:border-slate-700 flex items-center gap-2 bg-gray-50 dark:bg-slate-800">
               <Users size={14} className="text-blue-500" />
               <span className="font-semibold text-sm text-gray-900 dark:text-white">Actors ({data?.actors?.length || 0})</span>
@@ -178,7 +285,11 @@ export function SpecificationsPage() {
               </div>
             )}
           </div>
-        </div>
+
+          {/* Recent runs (filtered by this spec) */}
+          <RecentRunsTable filter={{ spec: viewKey }} emphasise="system" anchorId="runs" />
+        </div>;
+        })()
       ) : null}
     </div>
   );

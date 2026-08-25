@@ -16,11 +16,26 @@ A Gherkin-based DSL for writing FHIR interoperability test cases. Steps are matc
 <Actor> is available at "<endpoint>"
 <Actor> is available at "<endpoint>" as defined by "<canonical>"
 <Actor> is available as defined by "<canonical>"
+<Actor> is infrastructure
+<Actor> is infrastructure at "<endpoint>"
+<Actor> is infrastructure at "<endpoint>" as defined by "<canonical>"
+<Actor> is infrastructure as defined by "<canonical>"
 ```
 
 - `<Actor>` -- an identifier matching `[A-Za-z][A-Za-z0-9_]*`
 - `at` / `on` are interchangeable
 - Declaring an actor at an endpoint also sets `<Actor>Base` to that URL
+
+### Roles
+
+Each phrase assigns one of two roles:
+
+| Phrase | Role |
+|---|---|
+| `is the system under test` | `SUT` — measured for conformance |
+| `is available` / `is infrastructure` | `infra` — required to run the test, not measured |
+
+Multiple `SUT` actors are allowed in a single scenario (peer-to-peer testing).
 
 ## 2. HTTP Requests
 

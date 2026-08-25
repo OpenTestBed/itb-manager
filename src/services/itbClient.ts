@@ -602,3 +602,62 @@ export function getITBAppUrl(config: ITBConfig, ids?: { communityId?: number; or
   }
   return `${base}/app`;
 }
+
+/**
+ * Resolve a session-scoped or context-scoped ITB UI URL from API keys at click time.
+ * Hits /api/itb-ids to look up numeric IDs from the keys, then builds the deep link.
+ *
+ * Returns the deepest URL we can produce; falls back to {base}/app if any required
+ * numeric ID is missing. Callers should treat the result as best-effort.
+ *
+ * Reused by:
+ *  - "Run in ITB" buttons on Spec/System detail and matrix conformance rows
+ *  - Per-cell click on the conformance matrix
+ *  - Recent runs row "Open session" links
+ */
+export async function buildITBSessionUrl(
+  config: ITBConfig,
+  ctx: { systemKey?: string; actorKey?: string; specKey?: string; sessionId?: string | null },
+): Promise<string> {
+  const base = config.baseUrl.replace(/\/+$/, '');
+
+  // Path A — sessionId provided: read IDs straight off the testresults row in ITB's DB.
+  // This is the reliable path: ITB recorded community_id/organization_id/sut_id/actor_id
+  // when the session ran, so we don't depend on itbConfig having every key populated.
+  if (ctx.sessionId) {
+    try {
+      const resp = await fetch(`/api/itb-session-url?session=${encodeURIComponent(ctx.sessionId)}`);
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data?.url) return data.url;
+      }
+    } catch { /* fall through */ }
+  }
+
+  // Path B — no sessionId (or session lookup failed): resolve numeric IDs from API keys.
+  const params = new URLSearchParams({
+    org: config.organisationApiKey || '',
+    system: ctx.systemKey || config.systemApiKey || '',
+    community: config.communityApiKey || '',
+    actors: ctx.actorKey || '',
+    sutActor: ctx.actorKey || '',
+  });
+  let ids: any = {};
+  try {
+    const resp = await fetch(`/api/itb-ids?${params}`);
+    if (resp.ok) ids = await resp.json();
+  } catch { /* keep ids = {} */ }
+
+  const c = ids.communityId || config.communityId;
+  const o = ids.organisationId || config.organisationId;
+  const s = ids.systemId || config.systemId;
+  const a = ids.actorId || config.actorId;
+
+  if (c && o && s && a) {
+    let url = `${base}/app#/admin/users/community/${c}/organisation/${o}/test/${s}/${a}/execute`;
+    if (ids.testCaseId) url += `?tc=${ids.testCaseId}`;
+    else if (ids.testSuiteId) url += `?ts=${ids.testSuiteId}`;
+    return url;
+  }
+  return `${base}/app`;
+}
