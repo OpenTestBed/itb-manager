@@ -181,7 +181,7 @@ export function MatchesPage() {
     <div className="p-6 max-w-6xl mx-auto">
       <div className="flex items-center gap-3 mb-1">
         <Link2 size={22} className="text-blue-600 dark:text-blue-400" />
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Matches</h1>
+        <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Peer to Peer Transaction testing</h1>
       </div>
       <p className="text-sm text-gray-500 dark:text-slate-400 mb-5">
         Pair vendor systems for peer-to-peer test runs. A specification is{' '}

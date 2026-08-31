@@ -11,12 +11,39 @@ import {
 import { Markdown } from '../components/Markdown';
 
 // ── Types from /api/ig/discover ──────────────────────────────────────────────
+/** A `TestPlan.scope` entry, classified by what its canonical points at. */
+interface ScopeEntry {
+  reference: string;
+  description?: string;
+  /**
+   * Groups scope entries into table columns. 'actor' for a CapabilityStatement or
+   * ActorDefinition; otherwise derived from the resource type in the canonical, so
+   * a kind we've never seen ('transaction', …) still gets its own column.
+   */
+  kind?: string;
+  /** Column header for this kind, e.g. 'Actor', 'Transaction'. */
+  kindLabel?: string;
+  /** Display name — the resource's title when it's in the package, else the last URL segment. */
+  name?: string;
+  inPackage?: boolean;
+}
+
 interface TestPlan {
   id: string;
   name: string;
   description: string;
   type?: 'gherkin' | 'itb-zip' | 'unknown';
-  scope: { reference: string; description?: string }[];
+  scope: ScopeEntry[];
+  /** The scope entry naming the actor under test — drives the ITB actor binding. */
+  actor_scope?: ScopeEntry | null;
+  /** `TestPlan.runner` (1..1 in the Testing IG profile) — which runner these tests are for. */
+  runner?: string;
+  /** `TestPlan.mode` — declared modes that gate suites, inputs and parameters. */
+  modes?: { code: string; description?: string }[];
+  /** Why this plan can't be imported cleanly, reported against the element we looked at. */
+  problems?: { severity: 'error' | 'warning' | 'info'; message: string }[];
+  /** False when `problems` contains an error — the row is shown but not selectable. */
+  importable?: boolean;
   parameters: { name: string; value: string; mode?: string }[];
   suites: {
     name: string;
@@ -52,6 +79,24 @@ interface DomainOption { apiKey: string; shortName: string; fullName?: string; d
 interface SpecOption  { apiKey: string; shortName: string; fullName?: string; description?: string; }
 
 interface CompileError { message: string; issues: { severity: string; message: string; line?: number }[]; gherkin?: string; }
+
+/**
+ * Which of the actors ITB just created is this plan's system under test?
+ *
+ * `TestPlan.scope` names it by canonical (…/CapabilityStatement/MedicationOverviewConsumer);
+ * the deployed actor identifiers come from the Gherkin actor declarations, which use the
+ * same names. Match on the canonical's last segment, exactly first then case-insensitively.
+ * Returns '' when scope names no actor — the caller falls back to ITB's default.
+ */
+function resolveSutActorId(tp: TestPlan | undefined, deployedActorIds: string[]): string {
+  const ref = tp?.actor_scope?.reference || '';
+  if (!ref) return '';
+  const wanted = ref.split('/').pop() || '';
+  if (!wanted) return '';
+  return deployedActorIds.find(a => a === wanted)
+    || deployedActorIds.find(a => a.toLowerCase() === wanted.toLowerCase())
+    || '';
+}
 
 const SidePanel: React.FC<{ icon: any; title: string; status?: React.ReactNode; children: React.ReactNode }>
   = ({ icon: Icon, title, status, children }) => (
@@ -125,13 +170,45 @@ export function ImportIGPage() {
     return out;
   }, [discovery, appState.importedIGs]);
 
+  // ── Scope columns ──
+  // One table column per scope *kind* present in the package. Today that's Actor;
+  // when plans start scoping to a transaction, that column appears on its own with
+  // no change here — the kind and its label come from the discovery payload.
+  const SCOPE_KIND_ORDER = ['transaction', 'actor'];
+  const scopeColumns = useMemo(() => {
+    const byKind = new Map<string, string>();
+    for (const tp of discovery?.test_plans || []) {
+      for (const s of tp.scope || []) {
+        const kind = s.kind || 'unknown';
+        if (!byKind.has(kind)) byKind.set(kind, s.kindLabel || 'Scope');
+      }
+    }
+    // Always show Actor, even if a package has none — its absence is meaningful.
+    if (!byKind.has('actor')) byKind.set('actor', 'Actor');
+    return [...byKind.entries()]
+      .map(([kind, label]) => ({ kind, label }))
+      .sort((a, b) => {
+        const ai = SCOPE_KIND_ORDER.indexOf(a.kind);
+        const bi = SCOPE_KIND_ORDER.indexOf(b.kind);
+        if (ai !== bi) return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
+        return a.label.localeCompare(b.label);
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [discovery]);
+
   // ── Selection / compile / deploy ──
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [compiling, setCompiling] = useState<Set<string>>(new Set());
   const [compiled, setCompiled] = useState<Record<string, { zip_base64: string; zip_size: number }>>({});
   const [compileErrors, setCompileErrors] = useState<Record<string, CompileError>>({});
   const [deploying, setDeploying] = useState(false);
   const [deployErrors, setDeployErrors] = useState<Record<string, string>>({});
+  /** Non-fatal TDL validation warnings ITB reported per plan, shown after deploy. */
+  const [deployWarnings, setDeployWarnings] = useState<Record<string, string[]>>({});
+  /** Actors ITB created for the deployed plans — these are what matching binds systems to. */
+  const [deployedActors, setDeployedActors] = useState<{ actorId: string; actorApiKey: string }[]>([]);
+  const [deployedSpec, setDeployedSpec] = useState<{ key: string; name: string } | null>(null);
 
   // ── Reimport handoff (from Spec detail page) ──
   useEffect(() => {
@@ -236,7 +313,9 @@ export function ImportIGPage() {
       }
       const d: Discovery = await r.json();
       setDiscovery(d);
-      setSelected(new Set(d.test_plans.map(tp => tp.id)));
+      // Plans with a blocking problem (no suite, unresolvable script) are listed
+      // with the reason but never preselected — they can't compile.
+      setSelected(new Set(d.test_plans.filter(tp => tp.importable !== false).map(tp => tp.id)));
       // Suggest a spec name from the IG if we don't have one yet.
       if (!newSpecName) setNewSpecName(d.ig_name || '');
     } catch (e: any) {
@@ -324,7 +403,12 @@ export function ImportIGPage() {
   };
 
   // ── Pre-flight ──
-  const noCommunity = !itbConfig.communityApiKey && !itbConfig.apiKey;
+  // The community key can arrive from either side: the browser's own config
+  // (localStorage over VITE_ env defaults) or the server's state.json, which is
+  // what the dev-server middleware uses and what the settings dialog displays.
+  // Checking only itbConfig reported it missing while the dialog showed it.
+  const communityKey = appState.communityApiKey || itbConfig.communityApiKey || itbConfig.apiKey || '';
+  const noCommunity = !communityKey;
   const noBaseUrl = !itbConfig.baseUrl;
   const haveCompiled = Object.keys(compiled).length;
   const targetReady = !noCommunity && !noBaseUrl && !!domainKey && (
@@ -340,11 +424,14 @@ export function ImportIGPage() {
     if (!discovery) return;
     setDeploying(true);
     const newDeployErrors: Record<string, string> = {};
+    const newDeployWarnings: Record<string, string[]> = {};
     const deployedSpecKeys: string[] = [];
     let landingSpecKey = '';
     let landingSpecName = '';
 
-    const deployKey = itbConfig.communityApiKey || itbConfig.apiKey || '';
+    // Same fallback as the pre-flight check — otherwise a key that only reached
+    // server state would pass the banner and then deploy with an empty header.
+    const deployKey = communityKey;
     const baseUrl = itbConfig.baseUrl.replace(/\/+$/, '');
 
     try {
@@ -355,6 +442,19 @@ export function ImportIGPage() {
         specId = existingSpecKey;
         specName = targetSpec?.fullName || targetSpec?.shortName || '';
         if (!specId) throw new Error('Pick a specification to update');
+        // The target may come from recorded provenance (the "★ Update of …" badge),
+        // which keeps pointing at a specification key even after someone deletes that
+        // specification in ITB. Deploying into a dead key fails obscurely, so check.
+        const probe = await fetch(
+          `/itb-proxy/${encodeURIComponent(baseUrl)}/api/rest/specification/${encodeURIComponent(specId)}`,
+          { headers: { 'ITB_API_KEY': deployKey } },
+        ).catch(() => null);
+        if (!probe || !probe.ok) {
+          throw new Error(
+            `The target specification no longer exists in ITB (key ${specId}). `
+            + `It was remembered from a previous import — pick "Create new" or choose another specification.`,
+          );
+        }
       } else {
         specName = newSpecName.trim() || discovery.ig_name || 'Specification';
         const createResp = await fetch(
@@ -383,6 +483,13 @@ export function ImportIGPage() {
 
       // Push each compiled test suite into that spec.
       let lastDeployResult: any = null;
+      // actor identifiers ITB reports back per deployed plan, so we can bind each
+      // plan's conformance statement to the actor its TestPlan.scope names.
+      // CAREFUL: `identifier` means different things on the two ITB endpoints.
+      // In the deploy response, actors[].name is the actor id (MedicationOverviewConsumer)
+      // and actors[].identifier is its API key. On /specification/{key}/actors it is the
+      // other way round — `identifier` is the actor id and `apiKey` is the key.
+      const deployedActorsByPlan: Record<string, { name: string; apiKey: string }[]> = {};
       for (const id of Object.keys(compiled)) {
         const b64 = compiled[id].zip_base64;
         const binStr = atob(b64);
@@ -393,6 +500,11 @@ export function ImportIGPage() {
         const formData = new FormData();
         formData.append('updateSpecification', 'true');
         formData.append('specification', specId);
+        // ITB rejects any archive that produces validation warnings unless told not
+        // to, and generated suites routinely warn (e.g. a handler input it doesn't
+        // recognise). We accept them and surface them below rather than losing the
+        // deploy — warnings are reported, not swallowed.
+        formData.append('ignoreWarnings', 'true');
         formData.append('testSuite', zipFile);
 
         try {
@@ -401,7 +513,23 @@ export function ImportIGPage() {
             { method: 'POST', headers: { 'ITB_API_KEY': deployKey }, body: formData },
           );
           if (!resp.ok) throw new Error(`Deploy failed (${resp.status}): ${await resp.text()}`);
-          lastDeployResult = await resp.json();
+          const result = await resp.json();
+          // ITB answers 200 even when it *rejects* the archive — the verdict is
+          // `completed`, not the status code. Checking resp.ok alone reported a
+          // rejected suite as deployed and it silently never appeared in ITB.
+          if (result?.completed === false) {
+            const reasons = (result.errors || []).map((e: any) => e.description).filter(Boolean);
+            throw new Error(
+              `ITB rejected the test suite: ${reasons.length ? reasons.join(' | ') : 'no reason given'}`,
+            );
+          }
+          const warnings = (result?.warnings || []).map((w: any) => w.description).filter(Boolean);
+          if (warnings.length) newDeployWarnings[id] = warnings;
+          lastDeployResult = result;
+          deployedActorsByPlan[id] = ((lastDeployResult.identifiers?.specifications || []) as any[])
+            .flatMap(s => (s.actors || []))
+            .map((a: any) => ({ name: a.name || '', apiKey: a.identifier || '' }))
+            .filter((a: any) => a.name);
         } catch (e: any) {
           newDeployErrors[id] = e.message;
         }
@@ -409,19 +537,52 @@ export function ImportIGPage() {
       deployedSpecKeys.push(specId);
 
       // Best-effort post-deploy ITB plumbing (system + conformance), then ID resolution.
+      //
+      // Which actor is the SUT comes from each plan's `TestPlan.scope`, not from the
+      // actor's name: a real IG names its actors after CapabilityStatements
+      // (MedicationOverviewConsumer, …), so the old name === 'User' | 'SUT' guess
+      // missed and fell through to actors[0] — which could be the validator.
       if (lastDeployResult) {
         try {
-          const identifiers = lastDeployResult.identifiers || {};
-          const sutActorId = (identifiers.specifications || [])
-            .flatMap((s: any) => (s.actors || []))
-            .find((a: any) => a.name === 'User' || a.name === 'SUT')?.identifier || '';
-          await resolveITBIds(itbConfig, lastDeployResult, sutActorId);
-          const actors = await getSpecificationActors(itbConfig);
-          const sutActor = actors.find(a => a.actorId === sutActorId) || actors.find(a => a.default) || actors[0];
-          if (sutActor?.apiKey) {
-            const systemKey = await ensureSystem(itbConfig);
-            if (systemKey) await ensureConformance(itbConfig, systemKey, sutActor.apiKey);
+          // Ask for the actors of the spec we just deployed into, not the one
+          // configured in settings.
+          const actors = await getSpecificationActors(itbConfig, specId);
+          // On this endpoint `identifier` IS the actor id (see note above).
+          const actorIdOf = (a: any) => a?.identifier || a?.actorId || '';
+
+          // actor id → API key, for every plan whose scope named an actor.
+          const bound = new Map<string, string>();
+          for (const id of Object.keys(compiled)) {
+            if (newDeployErrors[id]) continue;
+            const tp = discovery.test_plans.find(t => t.id === id);
+            const deployed = deployedActorsByPlan[id] || [];
+            const sutActorId = resolveSutActorId(tp, deployed.map(a => a.name));
+            if (!sutActorId) continue;
+            const apiKey = deployed.find(a => a.name === sutActorId)?.apiKey
+              || actors.find(a => actorIdOf(a) === sutActorId)?.apiKey
+              || '';
+            if (apiKey) bound.set(sutActorId, apiKey);
           }
+
+          // /api/itb-ids resolves the numeric id from the actor *id*, not its key.
+          const firstActorId = [...bound.keys()][0] || '';
+          await resolveITBIds(itbConfig, lastDeployResult, firstActorId);
+
+          const systemKey = await ensureSystem(itbConfig);
+          const matchable: { actorId: string; actorApiKey: string }[] = [];
+          for (const [actorId, actorApiKey] of bound) {
+            matchable.push({ actorId, actorApiKey });
+            if (systemKey) await ensureConformance(itbConfig, systemKey, actorApiKey);
+          }
+          // Fall back to ITB's own default only when scope told us nothing at all.
+          if (matchable.length === 0) {
+            const fallback = actors.find(a => a.default) || actors[0];
+            if (fallback?.apiKey) {
+              matchable.push({ actorId: actorIdOf(fallback), actorApiKey: fallback.apiKey });
+              if (systemKey) await ensureConformance(itbConfig, systemKey, fallback.apiKey);
+            }
+          }
+          setDeployedActors(matchable);
         } catch { /* non-fatal */ }
       }
 
@@ -465,6 +626,7 @@ export function ImportIGPage() {
     }
 
     setDeployErrors(newDeployErrors);
+    setDeployWarnings(newDeployWarnings);
     setDeploying(false);
 
     const fatal = newDeployErrors['__top__'];
@@ -472,7 +634,10 @@ export function ImportIGPage() {
     if (!fatal && !allFailed && landingSpecKey) {
       sessionStorage.setItem('itm:just-created', landingSpecKey);
       selectSpec(landingSpecKey, landingSpecName);
-      navigate(`spec/${landingSpecKey}`);
+      // Stay on the page and show what landed — the deployed actors are the ones
+      // peer-to-peer matching binds systems to, so that handoff belongs here rather
+      // than behind a jump to the spec page.
+      setDeployedSpec({ key: landingSpecKey, name: landingSpecName });
     }
   };
 
@@ -541,7 +706,7 @@ export function ImportIGPage() {
             <div className="font-semibold text-amber-800 dark:text-amber-300">ITB connection not configured</div>
             <div className="text-amber-700 dark:text-amber-400 mt-0.5">
               {noBaseUrl && 'Missing ITB base URL. '}
-              {noCommunity && 'Missing community API key (needs "manage test suites" permission).'}
+              {noCommunity && 'No community API key. Get it from ITB → Communities → your community → API key. (The domain has its own key that looks identical and will not work here.)'}
             </div>
           </div>
           <button onClick={() => setITBSettingsOpen(true)} className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 text-white rounded text-sm hover:bg-amber-700">
@@ -692,76 +857,179 @@ export function ImportIGPage() {
               </button>
             </div>
           }>
-          <div className="-mx-4 divide-y divide-gray-100 dark:divide-slate-800">
-            {discovery.test_plans.map(tp => {
-              const isSel = selected.has(tp.id);
-              const isCompiling = compiling.has(tp.id);
-              const isCompiled = !!compiled[tp.id];
-              const error = compileErrors[tp.id];
-              const detection = detectionMap.get(tp.id);
-              return (
-                <div key={tp.id} className="px-4 py-3">
-                  <div className="flex items-start gap-3">
-                    <input type="checkbox" checked={isSel} onChange={e => {
-                      const s = new Set(selected);
-                      e.target.checked ? s.add(tp.id) : s.delete(tp.id);
-                      setSelected(s);
-                    }} className="mt-1 rounded flex-shrink-0" />
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="font-medium text-sm text-gray-900 dark:text-white">{tp.name}</span>
-                        {tp.type === 'itb-zip' && <span className="text-[10px] bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400 px-1.5 py-0.5 rounded-full">Pre-built ZIP</span>}
-                        {tp.type === 'gherkin' && <span className="text-[10px] bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 px-1.5 py-0.5 rounded-full">Gherkin</span>}
-                        {detection?.kind === 'new' && (
-                          <span className="text-[10px] bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 px-1.5 py-0.5 rounded-full" title="No matching TestPlan in any previously-imported IG">
-                            ✦ New
-                          </span>
-                        )}
-                        {detection?.kind === 'update' && (
-                          <span
-                            className="text-[10px] bg-emerald-100 dark:bg-emerald-900/30 text-emerald-800 dark:text-emerald-300 px-1.5 py-0.5 rounded-full"
-                            title={`Previously imported under IG "${detection.igName}"${detection.lastDeployedAt ? ` on ${new Date(detection.lastDeployedAt).toLocaleString()}` : ''} — ${detection.viaStableId ? 'matched by stable identifier' : 'matched by id within same IG'}`}>
-                            ★ Update of {detection.specName ? `"${detection.specName}"` : 'existing spec'}
-                          </span>
-                        )}
-                        {isCompiling && <span className="text-xs text-gray-500 dark:text-slate-400 flex items-center gap-1"><Loader2 size={10} className="animate-spin" /> Compiling…</span>}
-                        {isCompiled && (
-                          <span className="text-xs bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 px-1.5 py-0.5 rounded-full flex items-center gap-1">
-                            <Check size={10} /> Ready ({compiled[tp.id].zip_size.toLocaleString()} B)
-                          </span>
-                        )}
-                        {error && (
-                          <span className="text-xs bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400 px-1.5 py-0.5 rounded-full flex items-center gap-1">
-                            <AlertCircle size={10} /> Error
-                          </span>
-                        )}
-                        {(error || isCompiled) && (
-                          <button onClick={() => recompileOne(tp.id)} disabled={isCompiling}
-                            title="Recompile"
-                            className="text-xs text-gray-400 hover:text-blue-600 disabled:opacity-50">
-                            <RotateCw size={11} className={isCompiling ? 'animate-spin' : ''} />
-                          </button>
-                        )}
-                      </div>
-                      {tp.description && <Markdown className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">{tp.description}</Markdown>}
-                      <div className="flex flex-wrap gap-1 mt-1.5">
-                        {tp.scope.map((s, k) => (
-                          <span key={k} className="text-xs bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-400 px-1.5 py-0.5 rounded" title={s.reference}>
-                            {shortRef(s.reference)}
-                          </span>
-                        ))}
-                        {tp.suites.map((s, k) => (
-                          <span key={k} className="text-xs bg-gray-100 dark:bg-slate-800 text-gray-600 dark:text-slate-400 px-1.5 py-0.5 rounded">
-                            {s.name} ({s.tests?.length || 0} tests)
-                          </span>
-                        ))}
-                      </div>
-                      {error && <GherkinErrorView err={error} />}
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
+          <div className="-mx-4 overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-[10px] uppercase tracking-wider text-gray-500 dark:text-slate-400 border-b border-gray-200 dark:border-slate-700">
+                  <th className="w-8 px-4 py-2"></th>
+                  <th className="px-2 py-2 font-semibold">Test plan</th>
+                  {scopeColumns.map(c => (
+                    <th key={c.kind} className="px-2 py-2 font-semibold whitespace-nowrap">{c.label}</th>
+                  ))}
+                  <th className="px-2 py-2 font-semibold text-right whitespace-nowrap">Tests</th>
+                  <th className="px-2 py-2 font-semibold whitespace-nowrap">Status</th>
+                  <th className="w-8 px-2 py-2"></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100 dark:divide-slate-800">
+                {discovery.test_plans.map(tp => {
+                  const isSel = selected.has(tp.id);
+                  const isCompiling = compiling.has(tp.id);
+                  const isCompiled = !!compiled[tp.id];
+                  const error = compileErrors[tp.id];
+                  const detection = detectionMap.get(tp.id);
+                  const blocked = tp.importable === false;
+                  const isOpen = expanded.has(tp.id);
+                  const testCount = tp.suites.reduce((n, s) => n + (s.tests?.length || 0), 0);
+                  const hasDetail = !!tp.description || (tp.problems || []).length > 0 || !!error
+                    || tp.suites.length > 0 || (tp.modes || []).length > 0 || !!tp.runner;
+                  return (
+                    <React.Fragment key={tp.id}>
+                      <tr className={blocked ? 'opacity-60' : ''}>
+                        <td className="px-4 py-2.5 align-top">
+                          <input type="checkbox" checked={isSel} disabled={blocked} onChange={e => {
+                            const s = new Set(selected);
+                            e.target.checked ? s.add(tp.id) : s.delete(tp.id);
+                            setSelected(s);
+                          }} className="mt-0.5 rounded disabled:cursor-not-allowed" />
+                        </td>
+
+                        <td className="px-2 py-2.5 align-top">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="font-medium text-gray-900 dark:text-white">{tp.name}</span>
+                            {tp.type === 'itb-zip' && <span className="text-[10px] bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400 px-1.5 py-0.5 rounded-full">Pre-built ZIP</span>}
+                            {tp.type === 'gherkin' && <span className="text-[10px] bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 px-1.5 py-0.5 rounded-full">Gherkin</span>}
+                            {detection?.kind === 'new' && (
+                              <span className="text-[10px] bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 px-1.5 py-0.5 rounded-full" title="No matching TestPlan in any previously-imported IG">
+                                ✦ New
+                              </span>
+                            )}
+                            {detection?.kind === 'update' && (
+                              <span
+                                className="text-[10px] bg-emerald-100 dark:bg-emerald-900/30 text-emerald-800 dark:text-emerald-300 px-1.5 py-0.5 rounded-full"
+                                title={`Previously imported under IG "${detection.igName}"${detection.lastDeployedAt ? ` on ${new Date(detection.lastDeployedAt).toLocaleString()}` : ''} — ${detection.viaStableId ? 'matched by stable identifier' : 'matched by id within same IG'}`}>
+                                ★ Update of {detection.specName ? `"${detection.specName}"` : 'existing spec'}
+                              </span>
+                            )}
+                          </div>
+                        </td>
+
+                        {/* One cell per scope kind — Actor today, Transaction when plans carry one. */}
+                        {scopeColumns.map(c => {
+                          const hits = tp.scope.filter(s => (s.kind || 'unknown') === c.kind);
+                          return (
+                            <td key={c.kind} className="px-2 py-2.5 align-top">
+                              {hits.length === 0
+                                ? <span className="text-gray-300 dark:text-slate-600">—</span>
+                                : (
+                                  <div className="flex flex-col gap-1 items-start">
+                                    {hits.map((s, k) => (
+                                      <span key={k}
+                                        className="text-xs bg-indigo-50 dark:bg-indigo-900/20 text-indigo-700 dark:text-indigo-300 px-1.5 py-0.5 rounded whitespace-nowrap"
+                                        title={s.description ? `${s.reference}\n\n${s.description}` : s.reference}>
+                                        {s.name || shortRef(s.reference)}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                            </td>
+                          );
+                        })}
+
+                        <td className="px-2 py-2.5 align-top text-right tabular-nums text-gray-600 dark:text-slate-400">
+                          {testCount || <span className="text-gray-300 dark:text-slate-600">—</span>}
+                        </td>
+
+                        <td className="px-2 py-2.5 align-top whitespace-nowrap">
+                          {isCompiling && <span className="text-xs text-gray-500 dark:text-slate-400 flex items-center gap-1"><Loader2 size={10} className="animate-spin" /> Compiling…</span>}
+                          {!isCompiling && isCompiled && (
+                            <span className="text-xs bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 px-1.5 py-0.5 rounded-full inline-flex items-center gap-1">
+                              <Check size={10} /> Ready ({compiled[tp.id].zip_size.toLocaleString()} B)
+                            </span>
+                          )}
+                          {!isCompiling && error && (
+                            <span className="text-xs bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400 px-1.5 py-0.5 rounded-full inline-flex items-center gap-1">
+                              <AlertCircle size={10} /> Error
+                            </span>
+                          )}
+                          {!isCompiling && !isCompiled && !error && blocked && (
+                            <span className="text-xs bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400 px-1.5 py-0.5 rounded-full inline-flex items-center gap-1">
+                              <AlertCircle size={10} /> Cannot import
+                            </span>
+                          )}
+                          {!isCompiling && !isCompiled && !error && !blocked && (
+                            <span className="text-xs text-gray-400 dark:text-slate-500">Not compiled</span>
+                          )}
+                          {(error || isCompiled) && (
+                            <button onClick={() => recompileOne(tp.id)} disabled={isCompiling}
+                              title="Recompile"
+                              className="ml-1.5 text-xs text-gray-400 hover:text-blue-600 disabled:opacity-50 align-middle">
+                              <RotateCw size={11} className={isCompiling ? 'animate-spin' : ''} />
+                            </button>
+                          )}
+                        </td>
+
+                        <td className="px-2 py-2.5 align-top">
+                          {hasDetail && (
+                            <button
+                              onClick={() => setExpanded(prev => {
+                                const n = new Set(prev);
+                                n.has(tp.id) ? n.delete(tp.id) : n.add(tp.id);
+                                return n;
+                              })}
+                              title={isOpen ? 'Hide details' : 'Show details'}
+                              className="text-gray-400 hover:text-blue-600">
+                              <ChevronRight size={14} className={`transition-transform ${isOpen ? 'rotate-90' : ''}`} />
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+
+                      {isOpen && (
+                        <tr>
+                          <td />
+                          <td colSpan={scopeColumns.length + 4} className="px-2 pb-3 pt-0 align-top">
+                            {tp.description && <Markdown className="text-xs text-gray-500 dark:text-slate-400 mb-2">{tp.description}</Markdown>}
+                            <div className="flex flex-wrap gap-1">
+                              {tp.suites.map((s, k) => (
+                                <span key={k} className="text-xs bg-gray-100 dark:bg-slate-800 text-gray-600 dark:text-slate-400 px-1.5 py-0.5 rounded"
+                                  title={s.gherkin_file ? `from ${s.gherkin_file}` : ''}>
+                                  {s.name} ({s.tests?.length || 0} tests){s.mode ? ` · mode: ${s.mode}` : ''}
+                                </span>
+                              ))}
+                              {(tp.modes || []).map((m, k) => (
+                                <span key={k} className="text-xs bg-gray-100 dark:bg-slate-800 text-gray-500 dark:text-slate-400 px-1.5 py-0.5 rounded" title={m.description || ''}>
+                                  mode: {m.code}
+                                </span>
+                              ))}
+                              {tp.runner && (
+                                <span className="text-xs text-gray-400 dark:text-slate-500 px-1.5 py-0.5" title={`TestPlan.runner: ${tp.runner}`}>
+                                  runner: {shortRef(tp.runner)}
+                                </span>
+                              )}
+                            </div>
+                            {(tp.problems || []).length > 0 && (
+                              <ul className="mt-2 space-y-0.5">
+                                {(tp.problems || []).map((p, k) => (
+                                  <li key={k} className={`text-xs flex items-start gap-1.5 ${
+                                    p.severity === 'error' ? 'text-red-700 dark:text-red-400'
+                                    : p.severity === 'warning' ? 'text-amber-700 dark:text-amber-400'
+                                    : 'text-gray-500 dark:text-slate-400'}`}>
+                                    <AlertCircle size={11} className="mt-0.5 flex-shrink-0" />
+                                    <span>{p.message}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                            {error && <GherkinErrorView err={error} />}
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         </SidePanel>
       )}
@@ -820,6 +1088,59 @@ export function ImportIGPage() {
                 className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2">
                 {deploying ? <Loader2 size={14} className="animate-spin" /> : <ExternalLink size={14} />}
                 Deploy to ITB
+              </button>
+            </div>
+          </div>
+        </SidePanel>
+      )}
+
+      {/* ── 5. Deployed — hand off to peer-to-peer matching ── */}
+      {deployedSpec && (
+        <SidePanel icon={Check} title="Deployed"
+          status={<span className="text-xs text-green-700 dark:text-green-400">{deployedSpec.name}</span>}>
+          <div className="space-y-3 text-sm">
+            <div className="text-gray-700 dark:text-slate-300">
+              These actors are now matchable in <strong>{deployedSpec.name}</strong>. Bind a system to
+              each side to run one participant against another.
+            </div>
+            <ul className="border border-gray-200 dark:border-slate-700 rounded-lg divide-y divide-gray-200 dark:divide-slate-700">
+              {deployedActors.length === 0 && (
+                <li className="px-3 py-2 text-xs text-gray-500 dark:text-slate-400 italic">
+                  No SUT actor resolved — open the specification in ITB to check what was created.
+                </li>
+              )}
+              {deployedActors.map(a => (
+                <li key={a.actorApiKey} className="px-3 py-2 flex items-center gap-2">
+                  <Globe size={13} className="text-indigo-500 flex-shrink-0" />
+                  <span className="font-medium text-gray-900 dark:text-white">{a.actorId || a.actorApiKey}</span>
+                </li>
+              ))}
+            </ul>
+            {Object.keys(deployWarnings).length > 0 && (
+              <details className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-3 py-2">
+                <summary className="text-xs text-amber-800 dark:text-amber-300 cursor-pointer">
+                  Deployed with {Object.values(deployWarnings).reduce((n, w) => n + w.length, 0)} TDL validation warning(s)
+                </summary>
+                {Object.entries(deployWarnings).map(([id, ws]) => (
+                  <div key={id} className="mt-1.5">
+                    <div className="text-[10px] uppercase tracking-wide text-amber-700 dark:text-amber-400">{id}</div>
+                    <ul className="mt-0.5 space-y-0.5">
+                      {ws.map((w, k) => (
+                        <li key={k} className="text-[11px] text-amber-800 dark:text-amber-300 leading-snug">{w}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </details>
+            )}
+            <div className="flex justify-end gap-2">
+              <button onClick={() => navigate(`spec/${deployedSpec.key}`)}
+                className="px-4 py-2 border border-gray-300 dark:border-slate-600 rounded-lg text-sm hover:bg-gray-50 dark:hover:bg-slate-800 flex items-center gap-2">
+                <FileCheck size={14} /> Open specification
+              </button>
+              <button onClick={() => navigate('matches')}
+                className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 flex items-center gap-2">
+                <ChevronRight size={14} /> Set up peer to peer testing
               </button>
             </div>
           </div>

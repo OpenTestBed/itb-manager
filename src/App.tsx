@@ -204,7 +204,7 @@ function AppShell() {
             <button onClick={() => navigate('import-ig')} className={`p-1.5 rounded ${isActive('import-ig') ? 'bg-blue-600' : 'text-slate-400 hover:bg-slate-800'}`} title="Import IG"><PackagePlus size={14} /></button>
             <div className="w-5 border-t border-slate-800 my-1" />
             <button onClick={() => navigate('organizations')} className={`p-1.5 rounded ${isActive('organizations') ? 'bg-blue-600' : 'text-slate-400 hover:bg-slate-800'}`} title="Organizations"><Building2 size={14} /></button>
-            <button onClick={() => navigate('matches')} className={`p-1.5 rounded ${isActive('matches') ? 'bg-blue-600' : 'text-slate-400 hover:bg-slate-800'}`} title="Matches"><Link2 size={14} /></button>
+            <button onClick={() => navigate('matches')} className={`p-1.5 rounded ${isActive('matches') ? 'bg-blue-600' : 'text-slate-400 hover:bg-slate-800'}`} title="Peer to Peer Transaction testing"><Link2 size={14} /></button>
             <button onClick={() => navigate('services')} className={`p-1.5 rounded ${isActive('services') ? 'bg-blue-600' : 'text-slate-400 hover:bg-slate-800'}`} title="Services"><Container size={14} /></button>
             <div className="flex-1" />
             <button onClick={() => setITBSettingsOpen(true)} className="p-1.5 text-slate-500 hover:text-white rounded"><Settings size={13} /></button>
@@ -471,13 +471,13 @@ function AppShell() {
             )}
             </>}
 
-            {/* Matches — vendor persona only */}
+            {/* Peer to Peer Transaction testing — vendor persona only */}
             {persona === 'vendor' && (
               <>
                 <div className="my-1 mx-3 border-t border-slate-800" />
                 <button onClick={() => navigate('matches')}
-                  className={`w-full flex items-center gap-2 px-3 py-1.5 text-[12px] ${isActive('matches') ? 'bg-blue-600 text-white' : 'text-slate-300 hover:bg-slate-800'}`}>
-                  <Link2 size={13} /> Matches
+                  className={`w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-left leading-tight ${isActive('matches') ? 'bg-blue-600 text-white' : 'text-slate-300 hover:bg-slate-800'}`}>
+                  <Link2 size={13} className="flex-shrink-0" /> Peer to Peer Transaction testing
                 </button>
               </>
             )}

@@ -4,12 +4,43 @@ import { useAppContext } from '../context/AppContext';
 import { RecentRunsTable } from '../components/RecentRunsTable';
 import { Markdown } from '../components/Markdown';
 
+/** First sentence-ish of a long description, for a one-line summary. */
+function firstLine(text: string, max = 110): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  if (flat.length <= max) return flat;
+  const cut = flat.slice(0, max);
+  return cut.slice(0, cut.lastIndexOf(' ') > 40 ? cut.lastIndexOf(' ') : max) + '…';
+}
+
 export function SpecificationsPage() {
   const { path, navigate, appState, selectedSpecKey, selectSpec } = useAppContext();
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [justCreated, setJustCreated] = useState(false);
   const [itbSpecUrl, setITBSpecUrl] = useState<string | null>(null);
+  // Orphaned actors are hidden by default — they're clutter, not part of the spec's
+  // working surface, but they can't be found or removed if they're never shown.
+  const [showOrphans, setShowOrphans] = useState(false);
+  const [deletingActor, setDeletingActor] = useState<string>('');
+  const [actorError, setActorError] = useState('');
+
+  const deleteOrphanActor = async (specKey: string, actor: any) => {
+    if (!confirm(`Delete actor "${actor.identifier}" from this specification?\n\nNo test case references it. This cannot be undone.`)) return;
+    setDeletingActor(actor.apiKey);
+    setActorError('');
+    try {
+      const r = await fetch(`/api/specifications/${specKey}/actors/${actor.apiKey}`, { method: 'DELETE' });
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}));
+        throw new Error(e.error || `HTTP ${r.status}`);
+      }
+      const refreshed = await fetch(`/api/specifications/${specKey}/detail`).then(res => res.ok ? res.json() : null);
+      if (refreshed) setData(refreshed);
+    } catch (e: any) {
+      setActorError(`Could not delete ${actor.identifier}: ${e.message}`);
+    }
+    setDeletingActor('');
+  };
 
   // Parse path to determine view
   // #/specifications → list domains (or auto-drill)
@@ -257,8 +288,20 @@ export function SpecificationsPage() {
                     </div>
                     <div className="text-xs text-gray-500 dark:text-slate-400 ml-6 mt-0.5">
                       <code className="bg-gray-100 dark:bg-slate-800 px-1 rounded text-[10px]">{ts.identifier}</code>
-                      {ts.description && <span className="ml-2">{ts.description}</span>}
                     </div>
+                    {/* A suite's description is the whole Gherkin preamble — often a page
+                        of prose. Show the first line, keep the rest one click away. */}
+                    {ts.description && (
+                      <details className="ml-6 mt-1 group">
+                        <summary className="text-xs text-gray-500 dark:text-slate-400 cursor-pointer list-none marker:content-[''] truncate max-w-full hover:text-gray-700 dark:hover:text-slate-200">
+                          <span className="text-gray-400 dark:text-slate-500 group-open:hidden">{firstLine(ts.description)}</span>
+                          <span className="hidden group-open:inline text-blue-600 dark:text-blue-400">Hide description</span>
+                        </summary>
+                        <p className="text-xs text-gray-500 dark:text-slate-400 mt-1 whitespace-pre-line leading-relaxed max-w-[80ch]">
+                          {ts.description}
+                        </p>
+                      </details>
+                    )}
                   </div>
                 ))}
               </div>
@@ -266,25 +309,99 @@ export function SpecificationsPage() {
           </div>
 
           {/* Actors */}
+          {(() => {
+            const allActors: any[] = data?.actors || [];
+            // Three states, and they mean different things to a reader:
+            //   tested          — SUT in at least one test case; the only ones a system can be bound to
+            //   infrastructure  — used by test cases but never the SUT (a validator, a simulated peer)
+            //   orphan          — referenced by nothing at all
+            const stateOf = (a: any) => a.orphan ? 'orphan' : (a.sutTestCaseCount ? 'tested' : 'infra');
+            const orphans = allActors.filter(a => stateOf(a) === 'orphan');
+            const tested = allActors.filter(a => stateOf(a) === 'tested');
+            const infra = allActors.filter(a => stateOf(a) === 'infra');
+            const order = { tested: 0, infra: 1, orphan: 2 } as Record<string, number>;
+            const shown = (showOrphans ? allActors : allActors.filter(a => stateOf(a) !== 'orphan'))
+              .slice().sort((a, b) => order[stateOf(a)] - order[stateOf(b)]);
+            return (
           <div className="bg-white dark:bg-slate-900 rounded-lg border border-gray-200 dark:border-slate-700 overflow-hidden mb-4">
             <div className="px-4 py-2.5 border-b border-gray-200 dark:border-slate-700 flex items-center gap-2 bg-gray-50 dark:bg-slate-800">
               <Users size={14} className="text-blue-500" />
-              <span className="font-semibold text-sm text-gray-900 dark:text-white">Actors ({data?.actors?.length || 0})</span>
+              <span className="font-semibold text-sm text-gray-900 dark:text-white">
+                Actors <span className="font-normal text-gray-500 dark:text-slate-400">
+                  ({tested.length} tested{infra.length ? ` · ${infra.length} infrastructure` : ''}{orphans.length ? ` · ${orphans.length} orphaned` : ''})
+                </span>
+              </span>
+              <div className="flex-1" />
+              {orphans.length > 0 && (
+                <label className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-slate-400 cursor-pointer"
+                  title="An orphan is an actor ITB still lists but no test case references. ITB never removes actors on its own — undeploying a suite or renaming an actor leaves the old one behind.">
+                  <input type="checkbox" checked={showOrphans} onChange={e => setShowOrphans(e.target.checked)} className="rounded" />
+                  Show orphans
+                </label>
+              )}
             </div>
-            {!data?.actors?.length ? (
-              <div className="p-6 text-center text-sm text-gray-500">No actors.</div>
+            {!shown.length ? (
+              <div className="p-6 text-center text-sm text-gray-500">
+                {allActors.length ? 'All actors in this specification are orphaned — tick "Show orphans".' : 'No actors.'}
+              </div>
             ) : (
               <div className="divide-y divide-gray-100 dark:divide-slate-800">
-                {data.actors.map((a: any) => (
-                  <div key={a.apiKey} className="px-4 py-2 flex items-center gap-2">
-                    <Users size={12} className={a.identifier === 'User' ? 'text-blue-500' : 'text-gray-400'} />
-                    <span className="text-sm text-gray-900 dark:text-white">{a.name}</span>
+                {shown.map((a: any) => (
+                  <div key={a.apiKey} className={`px-4 py-2 flex items-center gap-2 ${a.orphan ? 'bg-amber-50/60 dark:bg-amber-900/10' : ''}`}>
+                    <Users size={12} className={
+                      stateOf(a) === 'orphan' ? 'text-amber-500'
+                      : stateOf(a) === 'tested' ? 'text-blue-500'
+                      : 'text-gray-300 dark:text-slate-600'} />
+                    <span className={`text-sm ${stateOf(a) === 'tested' ? 'text-gray-900 dark:text-white font-medium' : 'text-gray-500 dark:text-slate-400'}`}>
+                      {a.name}
+                    </span>
                     <code className="text-[10px] text-gray-400 bg-gray-100 dark:bg-slate-800 px-1 rounded">{a.identifier}</code>
+                    {stateOf(a) === 'tested' && (
+                      <span className="text-[10px] bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 px-1.5 py-0.5 rounded-full"
+                        title={`System under test in ${a.sutTestCaseCount} of ${a.testCaseCount} test cases — a system can claim conformance to this actor`}>
+                        tested · {a.sutTestCaseCount} test case{a.sutTestCaseCount === 1 ? '' : 's'}
+                      </span>
+                    )}
+                    {stateOf(a) === 'infra' && (
+                      <span className="text-[10px] bg-gray-100 dark:bg-slate-800 text-gray-500 dark:text-slate-400 px-1.5 py-0.5 rounded-full"
+                        title={`Used by ${a.testCaseCount} test case(s) but never the system under test — a validator or a simulated peer. Nothing claims conformance to it.`}>
+                        infrastructure
+                      </span>
+                    )}
+                    {a.orphan && (
+                      <span className="text-[10px] bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-300 px-1.5 py-0.5 rounded-full"
+                        title="No test case references this actor. Safe to delete unless a conformance statement uses it.">
+                        orphan
+                      </span>
+                    )}
+                    {a.statementCount ? (
+                      <span className="text-[10px] text-gray-400">{a.statementCount} statement{a.statementCount === 1 ? '' : 's'}</span>
+                    ) : null}
+                    <div className="flex-1" />
+                    {a.orphan && (
+                      <button
+                        onClick={() => deleteOrphanActor(viewKey, a)}
+                        disabled={deletingActor === a.apiKey || !!a.statementCount}
+                        title={a.statementCount
+                          ? 'Has a conformance statement — deleting would discard it and its test history'
+                          : `Delete actor ${a.identifier} from this specification`}
+                        className="flex items-center gap-1 px-2 py-0.5 text-[11px] rounded border border-red-200 dark:border-red-800 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-40 disabled:cursor-not-allowed">
+                        {deletingActor === a.apiKey ? <Loader2 size={10} className="animate-spin" /> : <X size={10} />}
+                        Delete
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
             )}
+            {actorError && (
+              <div className="px-4 py-2 text-xs text-red-600 dark:text-red-400 border-t border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20">
+                {actorError}
+              </div>
+            )}
           </div>
+            );
+          })()}
 
           {/* Recent runs (filtered by this spec) */}
           <RecentRunsTable filter={{ spec: viewKey }} emphasise="system" anchorId="runs" />

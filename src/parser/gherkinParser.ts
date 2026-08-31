@@ -51,7 +51,7 @@ export type IRAction =
   | { type: 'wait', durationMs: string }
   | { type: 'declareActor', id: string, name?: string, role?: string, endpoint?: string, canonical?: string }
   | { type: 'declareVariable', name: string, varType: string, value?: string }
-  | { type: 'interact', id?: string, desc?: string, inputTitle?: string, requests: { desc: string, name?: string, inputType?: string, required?: boolean, variable: string }[] }
+  | { type: 'interact', id?: string, desc?: string, inputTitle?: string, with?: string, requests: { desc: string, name?: string, inputType?: string, required?: boolean, variable: string }[], instructions?: { desc?: string, name?: string, value?: string }[] }
   | { type: 'receive', id?: string, desc?: string, handler: string, from?: string, to?: string, inputs?: Record<string,string> };
 
 
@@ -595,7 +595,20 @@ function materialize(actions: CatalogAction[], ctx: any): IRAction[] {
         required: r.required,
         variable: subst(r.variable ?? '')
       }));
-      out.push({ type: 'interact', id: subst(clone.interact.id ?? ''), desc: subst(clone.interact.desc ?? ''), inputTitle: subst(clone.interact.inputTitle ?? ''), requests });
+      const instructions = (clone.interact.instructions || []).map((i: any) => ({
+        desc: subst(i.desc ?? ''),
+        name: subst(i.name ?? ''),
+        value: subst(i.value ?? ''),
+      }));
+      out.push({
+        type: 'interact',
+        id: subst(clone.interact.id ?? ''),
+        desc: subst(clone.interact.desc ?? ''),
+        inputTitle: subst(clone.interact.inputTitle ?? ''),
+        with: subst(clone.interact.with ?? ''),
+        requests,
+        instructions,
+      });
       return;
     }
     if (clone.receive) {

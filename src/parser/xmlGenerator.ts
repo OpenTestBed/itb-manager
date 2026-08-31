@@ -479,8 +479,15 @@ function emitIR(ir: IRAction[]): string {
       const idAttr = a.id ? ` id="${escapeAttr(a.id)}"` : '';
       const descAttr = a.desc ? ` desc="${escapeAttr(a.desc)}"` : '';
       const titleAttr = a.inputTitle ? ` inputTitle="${escapeAttr(a.inputTitle)}"` : '';
-      out.push(`<interact${idAttr}${descAttr}${titleAttr}>`);
-      for (const req of a.requests) {
+      // `with` routes the interaction to one actor's tester instead of whoever is
+      // driving the session — TDL takes a literal actor id here.
+      const withAttr = a.with ? ` with="${escapeAttr(a.with)}"` : '';
+      out.push(`<interact${idAttr}${descAttr}${titleAttr}${withAttr}>`);
+      for (const ins of (a.instructions || [])) {
+        const nameAttr = ins.name ? ` name="${escapeAttr(ins.name)}"` : '';
+        out.push(`  <instruct desc="${escapeAttr(ins.desc || '')}"${nameAttr}>${escapeXml(ins.value || '""')}</instruct>`);
+      }
+      for (const req of (a.requests || [])) {
         const nameAttr = req.name ? ` name="${escapeAttr(req.name)}"` : '';
         const typeAttr = req.inputType ? ` inputType="${escapeAttr(req.inputType)}"` : '';
         const reqAttr = req.required != null ? ` required="${req.required}"` : '';

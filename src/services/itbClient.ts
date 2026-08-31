@@ -3,7 +3,7 @@ import JSZip from 'jszip';
 import type { GeneratedFile } from '../parser/xmlGenerator';
 
 export interface ITBConfig {
-  baseUrl: string;         // e.g. http://localhost:9000
+  baseUrl: string;         // e.g. http://localhost:10003
   deployPath: string;      // e.g. /api/rest/testsuite/deploy
   masterApiKey?: string;       // master API key for creating communities/domains
   organisationApiKey?: string; // organisation API key for test execution
@@ -33,7 +33,9 @@ const STORAGE_KEY = 'itb-config';
  */
 function envDefaults(): ITBConfig {
   return {
-    baseUrl: import.meta.env.VITE_ITB_BASE_URL || 'http://localhost:9000',
+    // 9000 is gitb-ui's port *inside* its container; the host publishes it on
+    // 10003, which is what the dev-server middleware defaults to as well.
+    baseUrl: import.meta.env.VITE_ITB_BASE_URL || 'http://localhost:10003',
     deployPath: import.meta.env.VITE_ITB_DEPLOY_PATH || '/api/rest/testsuite/deploy',
     masterApiKey: import.meta.env.VITE_ITB_MASTER_API_KEY || undefined,
     organisationApiKey: import.meta.env.VITE_ITB_ORGANISATION_API_KEY || undefined,
@@ -200,23 +202,53 @@ export async function checkITBHealth(baseUrl: string): Promise<{ ok: boolean; me
 }
 
 /**
- * Validate a master API key by attempting GET /api/rest/domains.
- * With a valid master key this returns 200; invalid returns 403.
+ * ITB refuses whole capability groups with "You are not allowed to manage
+ * <things> through the automation API." That is a Test Bed *configuration*
+ * refusal, not a bad key — it comes back identically whichever key you send,
+ * and the usual cause is the community's `allow_automation_api` flag being off
+ * (with `rest_api_enabled` still true globally, so the API looks enabled).
+ *
+ * Returns an explanatory message when the body has that signature, else null.
+ * Callers use it so a correct key isn't reported as rejected.
+ */
+function automationDisabledMessage(body: any): string | null {
+  const desc: string = body?.error_description || '';
+  const m = desc.match(/not allowed to ((?:manage|view) [\w\s]+?) through the automation API/i);
+  if (!m) return null;
+  return `ITB refuses to ${m[1].trim()} over the automation API — this is a Test Bed setting, not your key. `
+    + `Enable the automation API for the community (Communities.allow_automation_api).`;
+}
+
+/**
+ * Validate a master API key.
+ *
+ * The master key's scope in ITB is narrow — createCommunity / updateCommunity /
+ * deleteCommunity and nothing else. Everything this app does day to day (domains,
+ * specifications, actors, organisations, systems, test suite deploy) needs the
+ * *community* key instead. So we probe community creation with a deliberately
+ * invalid body: a valid master key gets past authorisation and fails on validation
+ * (400), while a wrong key is rejected outright (401/403).
+ *
+ * Probing GET /api/rest/domains here instead would always report failure, since
+ * that endpoint doesn't accept the master key at all.
  */
 export async function checkMasterKey(baseUrl: string, masterKey: string): Promise<{ ok: boolean; message: string }> {
-  const url = proxyUrl(baseUrl, '/api/rest/domains');
+  const url = proxyUrl(baseUrl, '/api/rest/community');
   try {
     const resp = await fetch(url, {
-      method: 'GET',
-      headers: { 'ITB_API_KEY': masterKey },
+      method: 'POST',
+      headers: { 'ITB_API_KEY': masterKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
       signal: AbortSignal.timeout(5000),
     });
-    if (resp.status === 200) {
-      return { ok: true, message: 'Master key valid' };
-    }
     const body = await resp.json().catch(() => null);
-    if (resp.status === 403 || resp.status === 401) {
+    const disabled = automationDisabledMessage(body);
+    if (disabled) return { ok: false, message: disabled };
+    if (resp.status === 401 || resp.status === 403) {
       return { ok: false, message: body?.error_description || 'Master key rejected' };
+    }
+    if (resp.status === 400 || resp.status === 200 || resp.status === 201) {
+      return { ok: true, message: 'Master key valid' };
     }
     return { ok: false, message: `Unexpected response (${resp.status})` };
   } catch (err: any) {
@@ -244,6 +276,10 @@ export async function checkOrganisationKey(baseUrl: string, apiKey: string): Pro
       return { ok: true, message: 'API key valid' };
     }
     const body = await resp.json().catch(() => null);
+    // Check this before the key-shaped branches: with the community's automation
+    // API disabled, every key gets this same refusal and none of them is at fault.
+    const disabled = automationDisabledMessage(body);
+    if (disabled) return { ok: false, message: disabled };
     if (body?.error_description?.includes('API key') || body?.error_code === '204') {
       return { ok: false, message: 'API key not recognized' };
     }
@@ -274,6 +310,8 @@ export async function checkSystemKey(baseUrl: string, orgApiKey: string, systemA
       // Shouldn't happen with dummy actor, but means both keys are valid
       return { ok: true, message: 'System key valid' };
     }
+    const disabled = automationDisabledMessage(body);
+    if (disabled) return { ok: false, message: disabled };
     // If the error mentions the actor (not the system), the system key is valid
     if (body?.error_description?.includes('actor') || body?.error_description?.includes('DUMMY_ACTOR_KEY')) {
       return { ok: true, message: 'System key valid' };
@@ -317,10 +355,8 @@ export async function checkCommunityKey(baseUrl: string, communityApiKey: string
     if (resp.status === 400 && body?.error_description?.includes('parse')) {
       return { ok: true, message: 'Community API key valid' };
     }
-    // "not allowed to manage" = key valid but wrong permissions
-    if (body?.error_description?.includes('not allowed')) {
-      return { ok: false, message: 'Key valid but lacks "manage test suites" permission' };
-    }
+    const disabled = automationDisabledMessage(body);
+    if (disabled) return { ok: false, message: disabled };
     if (body?.error_description?.includes('API key') || body?.error_code === '204') {
       return { ok: false, message: 'Community API key not recognized' };
     }
@@ -403,9 +439,12 @@ export interface ITBTestResult {
 /**
  * Get actors for the specification (to find actor API keys for test execution).
  */
-export async function getSpecificationActors(config: ITBConfig): Promise<any[]> {
-  if (!config.specificationId) return [];
-  const url = proxyUrl(config.baseUrl, `/api/rest/specification/${config.specificationId}/actors`);
+export async function getSpecificationActors(config: ITBConfig, specificationKey?: string): Promise<any[]> {
+  // Callers that just deployed pass the spec they deployed into; `config.specificationId`
+  // is the previously *configured* spec and would return the wrong actors (or none).
+  const specKey = specificationKey || config.specificationId;
+  if (!specKey) return [];
+  const url = proxyUrl(config.baseUrl, `/api/rest/specification/${specKey}/actors`);
   // Try community key first (has broader access), fall back to org key
   const apiKey = config.communityApiKey || config.organisationApiKey || config.apiKey || '';
   const headers: Record<string, string> = {};

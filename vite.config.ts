@@ -392,7 +392,16 @@ function compileApi(): Plugin {
 
           res.statusCode = 200;
           res.setHeader('Content-Type', 'application/zip');
-          res.setHeader('Content-Disposition', `attachment; filename="${result.testcaseName || 'testsuite'}.zip"`);
+          // The filename comes from the Gherkin `Feature:` title, which is free text —
+          // em dashes and accents are common. HTTP header values are latin1-only, so
+          // sending it raw makes Node throw "Invalid character in header content".
+          // Send an ASCII-folded name, plus the real one via RFC 5987 filename*.
+          const zipName = `${result.testcaseName || 'testsuite'}.zip`;
+          const asciiName = zipName.replace(/[^\x20-\x7E]/g, '-').replace(/["\\]/g, '');
+          res.setHeader(
+            'Content-Disposition',
+            `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(zipName)}`,
+          );
           res.end(zipBuffer);
         } catch (e: any) {
           res.statusCode = 500;
@@ -585,7 +594,8 @@ async function parseIGPackage(tgzBuffer: Buffer): Promise<any> {
   const igName = pkgMeta.name || 'unknown';
   const igVersion = pkgMeta.version || '';
   const igUrl = pkgMeta.canonical || '';
-  let fhirVersion = pkgMeta.fhirVersion || '';
+  // `fhirVersion` (singular) is the older key; IG publisher writes `fhirVersions[]`.
+  let fhirVersion = pkgMeta.fhirVersion || pkgMeta.fhirVersions || '';
   if (Array.isArray(fhirVersion)) fhirVersion = fhirVersion[0] || '';
 
   const deps: string[] = [];
@@ -593,46 +603,46 @@ async function parseIGPackage(tgzBuffer: Buffer): Promise<any> {
     if (!n.startsWith('hl7.fhir.r')) deps.push(`${n}#${v}`);
   }
 
-  // Collect all Binary resources (may contain Gherkin)
+  // Single content-driven pass over every JSON resource in the package.
+  //
+  // We can't key off filenames (`TestPlan-*.json` only holds for native R5/R6
+  // resources — an R4 IG carries the same thing as `Basic-*.json`) and we can't
+  // rely on `.index.json`, which isn't always published. So parse everything
+  // under package/ and classify by content.
   const binaries: Record<string, any> = {};
-  for (const [name, buf] of Object.entries(files)) {
-    if (name.includes('Binary-') && name.endsWith('.json')) {
-      try {
-        const data = JSON.parse(buf.toString('utf-8'));
-        if (data.resourceType === 'Binary') binaries[data.id || ''] = data;
-      } catch {}
-    }
-  }
-
-  // Find TestPlan resources
-  const testPlans: any[] = [];
-  for (const [name, buf] of Object.entries(files)) {
-    if (name.includes('TestPlan-') && name.endsWith('.json')) {
-      try {
-        const data = JSON.parse(buf.toString('utf-8'));
-        if (data.resourceType === 'TestPlan') {
-          // Deduplicate by id (same TestPlan can appear in example/ and tests/)
-          const tp = parseTestPlan(data, binaries, files);
-          if (!testPlans.some(existing => existing.id === tp.id)) {
-            testPlans.push(tp);
-          }
-        }
-      } catch {}
-    }
-  }
-
-  // Find profiles/actors
   const profiles: any[] = [];
+  const testPlanResources: any[] = [];
   for (const [name, buf] of Object.entries(files)) {
-    if (!name.startsWith('package/') || name.startsWith('package/tests/')) continue;
-    if (!name.endsWith('.json')) continue;
-    try {
-      const data = JSON.parse(buf.toString('utf-8'));
-      const rt = data.resourceType || '';
-      if (['StructureDefinition', 'ActorDefinition', 'CapabilityStatement'].includes(rt)) {
-        profiles.push({ id: data.id || '', name: data.name || data.title || '', url: data.url || '', type: rt });
+    if (!name.startsWith('package/') || !name.endsWith('.json')) continue;
+    if (name === 'package/package.json') continue;
+    if (name.startsWith('package/other/')) continue;        // publisher scratch output
+    if (path.basename(name).startsWith('.')) continue;      // .index.json et al
+    let data: any;
+    try { data = JSON.parse(buf.toString('utf-8')); } catch { continue; }
+    if (!data || typeof data !== 'object') continue;
+    const rt = data.resourceType || '';
+
+    if (rt === 'Binary') { binaries[data.id || ''] = data; continue; }
+
+    if (['StructureDefinition', 'ActorDefinition', 'CapabilityStatement'].includes(rt)) {
+      if (!name.startsWith('package/tests/')) {
+        profiles.push({
+          id: data.id || '', name: data.name || data.title || '',
+          title: data.title || '', url: data.url || '', type: rt,
+        });
       }
-    } catch {}
+      continue;
+    }
+
+    const tpResource = asTestPlan(data);
+    if (tpResource) testPlanResources.push(tpResource);
+  }
+
+  const testPlans: any[] = [];
+  for (const data of testPlanResources) {
+    // Deduplicate by id (same TestPlan can appear in example/ and tests/)
+    const tp = parseTestPlan(data, binaries, files, profiles);
+    if (!testPlans.some(existing => existing.id === tp.id)) testPlans.push(tp);
   }
 
   return { ig_name: igName, ig_version: igVersion, ig_url: igUrl, fhir_version: fhirVersion, dependencies: deps, test_plans: testPlans, profiles };
@@ -654,25 +664,187 @@ function stableIdOf(resource: any): string {
   return '';
 }
 
-function parseTestPlan(data: any, binaries: Record<string, any>, rawFiles: Record<string, Buffer>): any {
-  const scope = (data.scope || []).filter((s: any) => s.reference).map((s: any) => ({ reference: s.reference, description: s.description || '' }));
-  const parameters = (data.parameter || []).map((p: any) => ({ name: p.name || '', value: p.valueString || '', mode: p.mode || '' }));
+/** Prefix for the R5-in-R4 cross-version extensions an R4 IG uses to carry a TestPlan. */
+const TP_EXT_PREFIX = 'http://hl7.org/fhir/5.0/StructureDefinition/extension-TestPlan.';
+
+/** A FHIR element that is 0..* may arrive as a bare object when it occurs once. */
+function asArray(v: any): any[] {
+  if (v === undefined || v === null) return [];
+  return Array.isArray(v) ? v : [v];
+}
+
+/**
+ * Recognise a TestPlan in either shape an IG package can carry it:
+ *
+ *   R5/R6 — a native `TestPlan` resource.
+ *   R4    — a `Basic` resource coded `fhir-types#TestPlan`, with every field
+ *           carried as a `.../extension-TestPlan.*` cross-version extension.
+ *
+ * Returns a native-shaped TestPlan either way, so nothing downstream needs to
+ * know which FHIR version the IG was built for. Returns null if it's neither.
+ */
+function asTestPlan(data: any): any | null {
+  if (data.resourceType === 'TestPlan') return data;
+  if (data.resourceType !== 'Basic') return null;
+  const isTestPlan = asArray(data.code?.coding).some((c: any) =>
+    c?.code === 'TestPlan' && (!c.system || c.system === 'http://hl7.org/fhir/fhir-types'));
+  if (!isTestPlan) return null;
+  const lifted = liftCrossVersionExtensions(asArray(data.extension));
+  return { resourceType: 'TestPlan', id: data.id || '', ...lifted };
+}
+
+/** Add `value` under `key`, promoting to an array when the key repeats. */
+function assignRepeating(target: any, key: string, value: any): void {
+  if (value === undefined) return;
+  if (!(key in target)) { target[key] = value; return; }
+  if (Array.isArray(target[key])) target[key].push(value);
+  else target[key] = [target[key], value];
+}
+
+/** The `value[x]` payload of an extension, whatever `[x]` happens to be. */
+function extensionValue(ext: any): any {
+  for (const [k, v] of Object.entries(ext || {})) {
+    if (k.length > 5 && k.startsWith('value')) return v;
+  }
+  return undefined;
+}
+
+/**
+ * Rebuild one field from a cross-version extension. An extension carrying nested
+ * `extension[]` is a backbone element and recurses; otherwise its `value[x]` is
+ * the field value.
+ *
+ * Nested child urls appear in the wild both relative (`file`) and fully prefixed
+ * (`...extension-TestPlan.suite.input.file`), so accept either and keep only the
+ * last path segment.
+ */
+function liftExtension(ext: any): any {
+  const nested = asArray(ext?.extension);
+  if (nested.length === 0) return extensionValue(ext);
+  const out: any = {};
+  for (const child of nested) {
+    const raw = child?.url || '';
+    const rel = (raw.startsWith(TP_EXT_PREFIX) ? raw.slice(TP_EXT_PREFIX.length) : raw).split('.').pop() || '';
+    if (!rel) continue;
+    assignRepeating(out, rel, liftExtension(child));
+  }
+  return out;
+}
+
+/** Walk/create the path, then assign the leaf. Dotted top-level urls land nested. */
+function assignPath(root: any, segments: string[], value: any): void {
+  if (segments.length === 1) { assignRepeating(root, segments[0], value); return; }
+  const [head, ...rest] = segments;
+  if (root[head] === undefined) root[head] = {};
+  let node = root[head];
+  if (Array.isArray(node)) node = node[node.length - 1];
+  assignPath(node, rest, value);
+}
+
+/** Lift a flat `extension[]` list back into native FHIR fields. */
+function liftCrossVersionExtensions(extensions: any[]): any {
+  const out: any = {};
+  for (const ext of extensions) {
+    const url = ext?.url || '';
+    if (!url.startsWith(TP_EXT_PREFIX)) continue;
+    const segments = url.slice(TP_EXT_PREFIX.length).split('.').filter(Boolean);
+    if (segments.length === 0) continue;
+    assignPath(out, segments, liftExtension(ext));
+  }
+  return out;
+}
+
+/**
+ * `TestPlan.scope.reference` is `canonical(ActorDefinition | ImplementationGuide |
+ * StructureDefinition | CapabilityStatement | Requirements)`, but packages in the
+ * wild write it as a Reference, and the R4 lift can flatten the backbone away
+ * entirely. Accept every form and return the canonical URL.
+ */
+function normalizeScopeEntry(s: any): { reference: string; description: string } | null {
+  if (!s) return null;
+  if (typeof s === 'string') return { reference: s, description: '' };
+  const ref = typeof s.reference === 'string' ? s.reference
+    : (s.reference?.reference || s.valueCanonical || s.valueReference?.reference || '');
+  if (!ref) return null;
+  return { reference: String(ref), description: s.description || s.reference?.display || '' };
+}
+
+/**
+ * Decide what a scope canonical points at, and what to call it.
+ *
+ * `kind` groups scope entries so the UI can render one column per kind — Actor
+ * today, Transaction when plans start scoping to one. Rather than enumerate the
+ * kinds we know about, derive them from the resource type in the canonical
+ * (`<base>/<ResourceType>/<id>`), so a type we've never seen still gets its own
+ * column and label instead of being lumped into "unknown".
+ */
+const SCOPE_KIND_LABELS: Record<string, string> = {
+  actor: 'Actor',
+  transaction: 'Transaction',
+  requirements: 'Requirements',
+  structuredefinition: 'Profile',
+  implementationguide: 'Implementation Guide',
+  unknown: 'Scope',
+};
+
+function classifyScope(ref: string, profiles: any[]): { kind: string; kindLabel: string; name: string; inPackage: boolean } {
+  const hit = profiles.find(p => p.url && p.url === ref);
+  const typeFromUrl = (ref.match(/\/([A-Za-z]+)\/[^/]+\/?$/) || [])[1] || '';
+  const type = hit?.type || typeFromUrl;
+
+  // CapabilityStatement and ActorDefinition both describe an actor's behaviour —
+  // they are the same column as far as the ITB actor binding is concerned.
+  const kind = (type === 'CapabilityStatement' || type === 'ActorDefinition')
+    ? 'actor'
+    : (type ? type.toLowerCase() : 'unknown');
+
+  const kindLabel = SCOPE_KIND_LABELS[kind]
+    // Split a CamelCase resource type into words for an unrecognised kind.
+    || (type ? type.replace(/([a-z])([A-Z])/g, '$1 $2') : 'Scope');
+
+  const name = hit?.title || hit?.name || ref.split('/').pop() || ref;
+  return { kind, kindLabel, name, inPackage: !!hit };
+}
+
+function parseTestPlan(data: any, binaries: Record<string, any>, rawFiles: Record<string, Buffer>, profiles: any[] = []): any {
+  const scope = asArray(data.scope)
+    .map(normalizeScopeEntry)
+    .filter(Boolean)
+    .map((s: any) => ({ ...s, ...classifyScope(s.reference, profiles) }));
+  const parameters = asArray(data.parameter).map((p: any) => ({
+    name: p.name || '', value: String(extensionValue(p) ?? p.value ?? ''), mode: p.mode || '',
+  }));
+  const modes = asArray(data.mode).map((m: any) => ({ code: m?.code || '', description: m?.description || '' }));
+  const runner = data.runner || '';
   const stableId = stableIdOf(data);
 
-  const suites = (data.suite || []).map((s: any) => {
+  const suites = asArray(data.suite).map((s: any) => {
     let gherkinFile = '';
     let gherkinContent = '';
     let itbZipFile = '';
     let itbZipBase64 = '';  // pre-built ZIP, base64-encoded
     let suiteType: 'gherkin' | 'itb-zip' | 'unknown' = 'unknown';
 
-    for (const inp of (s.input || [])) {
+    // `suite.input` is `name` + (`file` XOR `resource`) + optional `mode` (constraint
+    // tp-1). A mode-gated input only applies when that mode is active; with no mode
+    // selection we take the ungated inputs and ignore the rest, so a mode-specific
+    // script can never be picked up by accident.
+    const gatedInputs: string[] = [];
+    for (const inp of asArray(s.input)) {
+      if (inp.mode) { gatedInputs.push(`${inp.name || '?'} (mode: ${inp.mode})`); continue; }
       if (inp.name === 'gherkin-script') {
         suiteType = 'gherkin';
         gherkinFile = inp.file || '';
-        // Try binary reference
+        // Inline `resource` — a Binary carrying the Gherkin directly.
+        if (inp.resource?.resourceType === 'Binary' && inp.resource.data) {
+          const candidate = decodeBinaryToGherkin(inp.resource.data);
+          if (looksLikeGherkin(candidate)) gherkinContent = candidate;
+          else console.log('[parseTestPlan] inline input.resource Binary does not look like Gherkin — ignoring.');
+        }
+        // Legacy: `sourceReference` to a Binary. Not part of the Testing IG profile
+        // (which allows only file XOR resource), kept for packages already using it.
         const bRef = inp.sourceReference?.reference || '';
-        if (bRef.startsWith('Binary/')) {
+        if (!gherkinContent && bRef.startsWith('Binary/')) {
           const bid = bRef.split('/')[1];
           if (binaries[bid]?.data) {
             const candidate = decodeBinaryToGherkin(binaries[bid].data);
@@ -691,6 +863,7 @@ function parseTestPlan(data: any, binaries: Record<string, any>, rawFiles: Recor
       } else if (inp.name === 'itb-test-suite') {
         suiteType = 'itb-zip';
         itbZipFile = inp.file || '';
+        if (inp.resource?.resourceType === 'Binary' && inp.resource.data) itbZipBase64 = inp.resource.data;
       }
     }
 
@@ -750,12 +923,14 @@ function parseTestPlan(data: any, binaries: Record<string, any>, rawFiles: Recor
       }
     }
 
-    const tests = (s.test || []).map((t: any) => ({ name: t.name || '', description: t.description || '' }));
+    const tests = asArray(s.test).map((t: any) => ({ name: t.name || '', description: t.description || '' }));
     return {
       name: s.name || '', description: s.description || '',
       type: suiteType,
+      mode: s.mode || '',
       gherkin_file: gherkinFile, gherkin_content: gherkinContent,
       itb_zip_file: itbZipFile, itb_zip_base64: itbZipBase64,
+      gated_inputs: gatedInputs,
       tests,
     };
   });
@@ -764,10 +939,43 @@ function parseTestPlan(data: any, binaries: Record<string, any>, rawFiles: Recor
   const types = suites.map((s: any) => s.type).filter((t: string) => t !== 'unknown');
   const testPlanType = types.includes('itb-zip') ? 'itb-zip' : types.includes('gherkin') ? 'gherkin' : 'unknown';
 
+  // The actor this plan tests. Drives which ITB Actor the deployed suite's SUT
+  // binds to, and therefore whether the plan shows up as matchable afterwards.
+  const actorScope = scope.find((s: any) => s.kind === 'actor') || null;
+
+  // Anything that stops this plan importing cleanly, reported against the element
+  // we actually looked at so the IG author can fix the source rather than guess.
+  const problems: { severity: 'error' | 'warning' | 'info'; message: string }[] = [];
+  if (suites.length === 0) {
+    problems.push({ severity: 'error', message: 'TestPlan declares no suite — nothing to compile.' });
+  }
+  for (const s of suites) {
+    if (s.type === 'gherkin' && !s.gherkin_content) {
+      problems.push({
+        severity: 'error',
+        message: `Suite "${s.name || '(unnamed)'}" declares no resolvable script. Expected suite.input[name="gherkin-script"] with either a file (found: ${s.gherkin_file || 'none'}) resolvable in the package, or an inline Binary resource.`,
+      });
+    }
+    if (s.type === 'unknown') {
+      problems.push({ severity: 'error', message: `Suite "${s.name || '(unnamed)'}" has no input named "gherkin-script" or "itb-test-suite".` });
+    }
+    for (const gated of s.gated_inputs) {
+      problems.push({ severity: 'info', message: `Suite "${s.name || '(unnamed)'}" input ${gated} skipped — no mode selected.` });
+    }
+  }
+  if (!actorScope) {
+    problems.push({
+      severity: 'warning',
+      message: 'No scope reference to a CapabilityStatement or ActorDefinition — the SUT actor will have to be chosen manually.',
+    });
+  }
+
   return {
     id: data.id || '', name: data.title || data.name || data.id || '', description: data.description || '',
-    url: data.url || '', scope, parameters, suites, raw_json: data,
+    url: data.url || '', scope, actor_scope: actorScope, parameters, modes, runner, suites, raw_json: data,
     type: testPlanType,
+    problems,
+    importable: !problems.some(p => p.severity === 'error'),
     // Stable cross-import identifier (FHIR Identifier with system=STABLE_ID_SYSTEM).
     // When present, use this as the dedup key; when absent, fall back to `id` (less stable).
     stableId,
@@ -872,8 +1080,11 @@ function managementApi(db: { container: string; user: string; password: string; 
       return mock ? mock.mockDbQuery(sql) : '';
     }
     try {
+      // --default-character-set=utf8mb4 is not optional: without it the client
+      // negotiates a non-UTF-8 charset and every non-ASCII character comes back
+      // mangled — em dashes in test suite names arrive as U+FFFD.
       return execSync(
-        `docker exec -e MYSQL_PWD=${db.password} ${db.container} mysql -u ${db.user} ${db.database} -N -e "${sql.replace(/\n/g, ' ')}"`,
+        `docker exec -e MYSQL_PWD=${db.password} ${db.container} mysql --default-character-set=utf8mb4 -u ${db.user} ${db.database} -N -e "${sql.replace(/\n/g, ' ')}"`,
         { encoding: 'utf-8', timeout: 5000 }
       ).trim();
     } catch { return ''; }
@@ -1106,9 +1317,40 @@ function managementApi(db: { container: string; user: string; password: string; 
           // Spec info
           let spec: any = { apiKey: specKey };
           try { const r = await itbFetch(`/specification/${specKey}`); if (r.ok) spec = await r.json(); } catch {}
-          // Actors
+          // Actors, annotated with usage so the UI can flag orphans.
+          //
+          // ITB creates actors from a test suite's TDL on deploy but never removes
+          // them: undeploying a suite, or renaming an actor (even a case change —
+          // SmartHelper vs SMARTHelper), leaves the old one behind forever. An actor
+          // referenced by no test case is dead weight, so count the references here.
           let actors: any[] = [];
           try { const r = await itbFetch(`/specification/${specKey}/actors`); if (r.ok) actors = await r.json(); } catch {}
+          const usageRaw = dbQuery(
+            `SELECT a.api_key, ` +
+            `(SELECT COUNT(*) FROM TestCaseHasActors t WHERE t.actor = a.id), ` +
+            `(SELECT COUNT(*) FROM TestCaseHasActors t WHERE t.actor = a.id AND t.sut = 1), ` +
+            `(SELECT COUNT(*) FROM SystemImplementsActors si WHERE si.actor_id = a.id) ` +
+            `FROM Actors a JOIN SpecificationHasActors sha ON sha.actor_id = a.id ` +
+            `WHERE sha.spec_id = (SELECT id FROM Specifications WHERE api_key = '${specKey}')`
+          );
+          const usage = new Map<string, { testCases: number; asSut: number; statements: number }>();
+          if (usageRaw) {
+            for (const line of usageRaw.split('\n')) {
+              const [key, tcs, sut, stmts] = line.split('\t');
+              if (key) usage.set(key, { testCases: Number(tcs) || 0, asSut: Number(sut) || 0, statements: Number(stmts) || 0 });
+            }
+          }
+          actors = actors.map((a: any) => {
+            const u = usage.get(a.apiKey);
+            return {
+              ...a,
+              testCaseCount: u?.testCases ?? null,   // null = couldn't determine (no DB access)
+              sutTestCaseCount: u?.asSut ?? null,
+              statementCount: u?.statements ?? null,
+              // Orphan: in the spec but referenced by no test case at all.
+              orphan: u ? u.testCases === 0 : false,
+            };
+          });
           // Test suites from DB
           const testSuites: any[] = [];
           const raw = dbQuery(`SELECT ts.id, ts.identifier, ts.sname, ts.description FROM TestSuites ts JOIN SpecificationHasTestSuites shts ON shts.testsuite = ts.id WHERE shts.spec = (SELECT id FROM Specifications WHERE api_key = '${specKey}')`);
@@ -1120,6 +1362,51 @@ function managementApi(db: { container: string; user: string; password: string; 
           }
           res.setHeader('Content-Type', 'application/json');
           res.end(JSON.stringify({ ...spec, actors, testSuites }));
+          return;
+        }
+
+        // DELETE /api/specifications/{specKey}/actors/{actorKey} — remove an orphan.
+        // Refuses anything still referenced: an actor used by a test case, or one a
+        // system has a conformance statement against (deleting that would discard the
+        // statement and its test history).
+        if (req.method === 'DELETE' && pathParts.length >= 3 && pathParts[1] === 'actors') {
+          const specKey = pathParts[0];
+          const actorKey = pathParts[2];
+          res.setHeader('Content-Type', 'application/json');
+          try {
+            const guard = dbQuery(
+              `SELECT ` +
+              `(SELECT COUNT(*) FROM TestCaseHasActors t WHERE t.actor = a.id), ` +
+              `(SELECT COUNT(*) FROM SystemImplementsActors si WHERE si.actor_id = a.id) ` +
+              `FROM Actors a JOIN SpecificationHasActors sha ON sha.actor_id = a.id ` +
+              `WHERE a.api_key = '${actorKey}' ` +
+              `AND sha.spec_id = (SELECT id FROM Specifications WHERE api_key = '${specKey}')`
+            );
+            if (!guard) {
+              res.statusCode = 404;
+              res.end(JSON.stringify({ error: 'Actor not found in this specification' }));
+              return;
+            }
+            const [tcs, stmts] = guard.split('\n')[0].split('\t').map(n => Number(n) || 0);
+            if (tcs > 0 || stmts > 0) {
+              res.statusCode = 409;
+              res.end(JSON.stringify({
+                error: `Actor is still in use (${tcs} test case(s), ${stmts} conformance statement(s)) — not an orphan.`,
+              }));
+              return;
+            }
+            const r = await itbFetch(`/actor/${actorKey}`, { method: 'DELETE' });
+            const text = await r.text();
+            if (!r.ok) {
+              res.statusCode = r.status;
+              res.end(JSON.stringify({ error: text || `ITB returned ${r.status}` }));
+              return;
+            }
+            res.end(JSON.stringify({ ok: true }));
+          } catch (e: any) {
+            res.statusCode = 500;
+            res.end(JSON.stringify({ error: e.message }));
+          }
           return;
         }
         next();

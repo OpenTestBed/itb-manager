@@ -10,7 +10,12 @@ export type CatalogAction =
   | { send: { id?: string; desc?: string; handler: string; from?: string; to?: string; inputs: Record<string,string> } }
   | { declareActor: { id: string; name?: string; role?: string; endpoint?: string; canonical?: string } }
   | { declareVariable: { name: string; varType?: string; value?: string } }
-  | { interact: { id?: string; desc?: string; inputTitle?: string; requests: { desc: string; name?: string; inputType?: string; required?: boolean; variable: string }[] } }
+  // `requests` drives <request> children (asking the tester for input); `instructions`
+  // drives <instruct> children (telling the tester something). TDL requires an
+  // <interact> to carry at least one of documentation/instruct/request, so a step
+  // that supplies neither produces an archive ITB rejects.
+  // `with` targets one actor's tester rather than whoever is driving the session.
+  | { interact: { id?: string; desc?: string; inputTitle?: string; with?: string; requests?: { desc: string; name?: string; inputType?: string; required?: boolean; variable: string }[]; instructions?: { desc?: string; name?: string; value?: string }[] } }
   | { receive: { id?: string; desc?: string; handler: string; from?: string; to?: string; inputs?: Record<string,string> } }
   | { log: string };
 

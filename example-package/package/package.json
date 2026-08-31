@@ -1,0 +1,35 @@
+{
+  "name" : "my-ig",
+  "version" : "1.0.0",
+  "tools-version" : 3,
+  "type" : "IG",
+  "date" : "20260826155922",
+  "license" : "CC0-1.0",
+  "canonical" : "http://example.com/fhir/example",
+  "notForPublication" : true,
+  "url" : "file://E:\\work\\ImplementationGuides\\pharm-MEOW-test\\output",
+  "title" : "HL7 FHIR Implementation Guide: Example IG Release 1 - US Realm | STU1",
+  "description" : "Example IG exercises many of the fields in a SUSHI configuration. (built Wed, Aug 26, 2026 15:59+0200+02:00)",
+  "fhirVersions" : ["4.0.1"],
+  "dependencies" : {
+    "hl7.fhir.r4.core" : "4.0.1",
+    "hl7.terminology.r4" : "7.3.0",
+    "hl7.fhir.uv.extensions.r4" : "5.3.0",
+    "hl7.fhir.uv.testing" : "current"
+  },
+  "author" : "My Organization",
+  "maintainers" : [{
+    "name" : "My Organization",
+    "email" : "my-group@example.com",
+    "url" : "http://example.com/committees"
+  },
+  {
+    "name" : "Bob Smith",
+    "email" : "bobsmith@example.com"
+  }],
+  "directories" : {
+    "lib" : "package",
+    "example" : "example"
+  },
+  "jurisdiction" : "http://unstats.un.org/unsd/methods/m49/m49.htm#001"
+}

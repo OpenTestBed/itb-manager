@@ -1,0 +1,20 @@
+{
+  "index-version" : 2,
+  "files" : [{
+    "filename" : "ImplementationGuide-my-ig.json",
+    "resourceType" : "ImplementationGuide",
+    "id" : "my-ig",
+    "url" : "http://example.com/fhir/example/ImplementationGuide/my-ig",
+    "version" : "1.0.0"
+  },
+  {
+    "filename" : "Binary-meow-client-gherkin-script.json",
+    "resourceType" : "Binary",
+    "id" : "meow-client-gherkin-script"
+  },
+  {
+    "filename" : "Basic-meow-client-tests.json",
+    "resourceType" : "Basic",
+    "id" : "meow-client-tests"
+  }]
+}
